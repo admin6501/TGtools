@@ -3,16 +3,16 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageH
 from telethon import TelegramClient, events
 import asyncio
 
-API_ID, API_HASH, PHONE, CHANNEL = range(4)
+API_ID, API_HASH, PHONE, CHANNEL, AUTH_CODE = range(5)
 
 user_data = {}
 auto_reply_active = False
 default_reply = "صبور باشید در اسرع وقت پاسخگو هستم."
 keep_alive_active = False
 
-async def start_telegram_client(api_id, api_hash, phone_number, channel_username):
+async def start_telegram_client(api_id, api_hash, phone_number, auth_code, channel_username):
     client = TelegramClient('user_session', api_id, api_hash)
-    await client.start(phone=phone_number)
+    await client.start(phone=phone_number, code_callback=lambda: auth_code)
     await client.send_message(channel_username, "ربات با موفقیت فعال شد")
     
     @client.on(events.NewMessage(incoming=True))
@@ -60,11 +60,18 @@ def phone(update: Update, context: CallbackContext) -> int:
 def channel(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
     user_data[user_id]['channel_username'] = update.message.text
+    update.message.reply_text("لطفاً کد احراز هویت تلگرام خود را وارد کنید:")
+    return AUTH_CODE
+
+def auth_code(update: Update, context: CallbackContext) -> int:
+    user_id = update.effective_user.id
+    user_data[user_id]['auth_code'] = update.message.text
     update.message.reply_text("در حال شروع ربات بر روی حساب شما. لطفاً صبور باشید...")
     asyncio.run(start_telegram_client(
         int(user_data[user_id]['api_id']),
         user_data[user_id]['api_hash'],
         user_data[user_id]['phone'],
+        user_data[user_id]['auth_code'],
         user_data[user_id]['channel_username']
     ))
     update.message.reply_text("ربات با موفقیت فعال شد و آماده به کار است!")
@@ -127,6 +134,7 @@ def main() -> None:
             API_HASH: [MessageHandler(Filters.text & ~Filters.command, api_hash)],
             PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
             CHANNEL: [MessageHandler(Filters.text & ~Filters.command, channel)],
+            AUTH_CODE: [MessageHandler(Filters.text & ~Filters.command, auth_code)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
