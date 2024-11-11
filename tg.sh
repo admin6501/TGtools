@@ -29,11 +29,16 @@ default_reply = "صبور باشید در اسرع وقت پاسخگو هستم.
 auto_reply_count = 0
 last_auto_reply_time = None
 
+banned_users = set()
+
 def is_admin(user_id):
     return str(user_id) in admin_users
 
 def is_bot(user):
     return user.bot
+
+def is_banned(user_id):
+    return str(user_id) in banned_users
 
 async def keep_alive():
     global keep_alive_active
@@ -118,46 +123,31 @@ async def show_help(event):
         ".startpish - Start auto-reply.\n"
         ".stoppish - Stop auto-reply.\n"
         ".edit <message> - Edit auto-reply message.\n"
+        ".ban <user_id> - Ban a user.\n"
+        ".unban <user_id> - Unban a user.\n"
         ".status - Show bot status.\n"
     )
     await event.reply(help_message)
 
-@client.on(events.NewMessage(incoming=True))
-async def auto_reply(event):
-    global auto_reply_active, default_reply, auto_reply_count, last_auto_reply_time
-    sender = await event.get_sender()
-    if auto_reply_active and event.is_private and not is_bot(sender):
-        await event.reply(default_reply)
-        auto_reply_count += 1
-        last_auto_reply_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-@client.on(events.NewMessage(pattern=r'\.status'))
-async def status(event):
+@client.on(events.NewMessage(pattern=r'\.ban (\d+)'))
+async def ban_user(event):
     if not is_admin(event.sender_id):
         await event.reply("You are not authorized to use this command.")
         return
 
-    global keep_alive_active, auto_reply_active, auto_reply_count, last_auto_reply_time
-    status_message = (
-        f"**Bot Status:**\n"
-        f"Auto-reply: {'Active' if auto_reply_active else 'Inactive'}\n"
-        f"Keepalive: {'Active' if keep_alive_active else 'Inactive'}\n"
-        f"Auto-reply count: {auto_reply_count}\n"
-        f"Last auto-reply time: {last_auto_reply_time if last_auto_reply_time else 'No replies yet'}"
-    )
-    await event.reply(status_message)
+    user_id = event.pattern_match.group(1)
+    banned_users.add(user_id)
+    await event.reply(f"User {user_id} has been banned.")
 
-async def main():
-    await client.start(phone=phone_number)
-    print("Client Created and Online")
+@client.on(events.NewMessage(pattern=r'\.unban (\d+)'))
+async def unban_user(event):
+    if not is_admin(event.sender_id):
+        await event.reply("You are not authorized to use this command.")
+        return
 
-    await client.run_until_disconnected()
-
-client.loop.run_until_complete(main())
-EOF
-)
-
-echo "$PYTHON_CODE" > $PYTHON_FILE
-echo "Python file '$PYTHON_FILE' has been created."
-
-python3 $PYTHON_FILE
+    user_id = event.pattern_match.group(1)
+    if user_id in banned_users:
+        banned_users.remove(user_id)
+        await event.reply(f"User {user_id} has been unbanned.")
+    else:
+        await event.reply(f"User
