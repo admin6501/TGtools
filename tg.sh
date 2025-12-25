@@ -864,4 +864,3 @@ PY
 
 log "Python file '${PYTHON_FILE}' has been created."
 python3 "$PYTHON_FILE"
-```0
