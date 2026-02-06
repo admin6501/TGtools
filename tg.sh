@@ -113,6 +113,11 @@ pip_install() {
   python3 -m pip install --user "${pkgs[@]}"
 }
 
+# Check if a Python package is importable
+py_pkg_installed() {
+  python3 -c "import $1" >/dev/null 2>&1
+}
+
 download_vazirmatn_font() {
   if [[ -f "$VZ_FONT_FILE" ]]; then
     log "Vazirmatn font already exists: $VZ_FONT_FILE"
@@ -138,11 +143,50 @@ download_vazirmatn_font() {
 
 preflight() {
   log "Preflight: checking prerequisites..."
-  install_system_packages || true
-  ensure_python_and_pip
-  log "Installing Python dependencies (telethon, pillow)..."
-  pip_install telethon pillow || die "Failed to install required Python packages."
+
+  # 1) Check python3 & pip
+  local need_sys=false
+  if ! have python3; then
+    log "python3 not found."
+    need_sys=true
+  elif ! python3 -m pip --version >/dev/null 2>&1; then
+    log "pip not found."
+    need_sys=true
+  else
+    log "python3 and pip are already installed."
+  fi
+
+  if $need_sys; then
+    log "Installing system packages..."
+    install_system_packages || true
+    ensure_python_and_pip
+  fi
+
+  # 2) Check Python libraries (telethon, pillow)
+  local missing_pkgs=()
+  if ! py_pkg_installed telethon; then
+    missing_pkgs+=("telethon")
+  fi
+  if ! py_pkg_installed PIL; then
+    missing_pkgs+=("pillow")
+  fi
+
+  if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+    log "Missing Python packages: ${missing_pkgs[*]}. Installing..."
+    pip_install "${missing_pkgs[@]}" || die "Failed to install required Python packages."
+  else
+    log "All Python dependencies (telethon, pillow) are already installed."
+  fi
+
+  # 3) Check curl/wget (needed for font download)
+  if ! have curl && ! have wget; then
+    log "Neither curl nor wget found. Installing..."
+    install_system_packages || true
+  fi
+
+  # 4) Check Vazirmatn font
   download_vazirmatn_font
+
   log "Preflight complete."
 }
 
