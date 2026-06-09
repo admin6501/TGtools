@@ -5,7 +5,7 @@ PYTHON_FILE="tools.py"
 
 # --- Vazirmatn font ---
 VZ_FONT_FILE="Vazirmatn-Regular.ttf"
-VZ_FONT_URL="https://github.com/rastikerdar/vazirmatn/raw/master/dist/Vazirmatn-Regular.ttf"
+VZ_FONT_URL="https://cdn.jsdelivr.net/npm/vazirmatn@latest/fonts/ttf/Vazirmatn-Regular.ttf"
 # ----------------------
 
 log() { printf '%s\n' "$*"; }
@@ -243,7 +243,8 @@ from telethon.tl.types import InputStickerSetShortName, InputStickerSetItem
 from telethon.tl.functions.account import UpdateStatusRequest
 
 from dotenv import load_dotenv
-load_dotenv()
+# Load .env located next to this script (robust for foreground + systemd runs).
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 try:
     from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
@@ -1218,8 +1219,8 @@ if [[ "$persist" =~ ^[Yy]$ ]]; then
   python3 - <<'LOGIN'
 import os
 from telethon import TelegramClient
-from dotenv import load_dotenv
-load_dotenv()
+# Credentials are exported by the parent script; no dotenv needed here
+# (load_dotenv() breaks when running via "python3 -" / stdin).
 api_id = int(os.environ["TG_API_ID"])
 api_hash = os.environ["TG_API_HASH"]
 phone = os.environ["TG_PHONE_NUMBER"]
