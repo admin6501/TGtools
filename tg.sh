@@ -359,6 +359,28 @@ async def _image_to_text(image_b64):
         print(f"OCR error: {e}")
         return None
 
+# Translate text into a target language using the configured model.
+async def _translate(text, target_lang):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        return None
+    try:
+        tchat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"tr_{int(time.time() * 1000)}",
+            system_message="\u062a\u0648 \u06cc\u06a9 \u0645\u062a\u0631\u062c\u0645 \u062d\u0631\u0641\u0647\u200c\u0627\u06cc \u0647\u0633\u062a\u06cc. \u0641\u0642\u0637 \u0645\u062a\u0646 \u062a\u0631\u062c\u0645\u0647\u200c\u0634\u062f\u0647 \u0631\u0627 \u0628\u062f\u0647\u060c \u0628\u062f\u0648\u0646 \u062a\u0648\u0636\u06cc\u062d \u0627\u0636\u0627\u0641\u0647.",
+        ).with_model(current_provider, current_model)
+        prompt = (
+            f"\u0645\u062a\u0646 \u0632\u06cc\u0631 \u0631\u0627 \u0628\u0647 \u0632\u0628\u0627\u0646 \u00ab{target_lang}\u00bb \u062a\u0631\u062c\u0645\u0647 \u06a9\u0646 \u0648 \u0641\u0642\u0637 \u062a\u0631\u062c\u0645\u0647 \u0631\u0627 \u062e\u0631\u0648\u062c\u06cc \u0628\u062f\u0647:\n\n"
+            + text
+        )
+        resp = await tchat.send_message(UserMessage(text=prompt))
+        if isinstance(resp, str):
+            return resp.strip()
+        return str(resp).strip()
+    except Exception as e:
+        print(f"Translate error: {e}")
+        return None
+
 # ---- persistent settings (survive restart / service reload) ----
 CONFIG_FILE = "bot_config.json"
 
@@ -857,6 +879,7 @@ async def show_help(event):
         ".edit <message> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u06cc\u0627\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 (\u0648\u0642\u062a\u06cc AI \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a).\n"
         ".st - \u062a\u0628\u062f\u06cc\u0644 \u0645\u062a\u0646 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0628\u0647 \u0627\u0633\u062a\u06cc\u06a9\u0631.\n"
         ".ocr - \u0631\u06cc\u067e\u0644\u0627\u06cc \u0631\u0648\u06cc \u0639\u06a9\u0633: \u0627\u0633\u062a\u062e\u0631\u0627\u062c \u0645\u062a\u0646/\u062a\u0648\u0635\u06cc\u0641 \u0648 \u0627\u0631\u0633\u0627\u0644 \u0628\u0647 Saved Messages.\n"
+        ".tr [\u0632\u0628\u0627\u0646] - \u062a\u0631\u062c\u0645\u0647\u200c\u06cc \u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u06cc\u0627 \u0645\u062a\u0646 (\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0641\u0627\u0631\u0633\u06cc).\n"
         ".status - \u0646\u0645\u0627\u06cc\u0634 \u0648\u0636\u0639\u06cc\u062a \u0631\u0628\u0627\u062a.\n"
     )
     await event.reply(help_message)
@@ -995,6 +1018,45 @@ async def image_to_text_cmd(event):
             await event.reply(confirm)
         except Exception:
             pass
+
+@client.on(events.NewMessage(pattern=r"^\.tr(?:\s+(?P<arg>[\s\S]+))?$"))
+@admin_only
+async def translate_cmd(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a (\u06a9\u0644\u06cc\u062f Emergent \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647).")
+        return
+    arg = (event.pattern_match.group("arg") or "").strip()
+    target = "\u0641\u0627\u0631\u0633\u06cc"
+    reply = await event.get_reply_message() if event.is_reply else None
+    if reply is not None:
+        src_text = (reply.raw_text or "").strip()
+        if arg:
+            target = arg
+    else:
+        src_text = arg
+    if not src_text:
+        await event.reply(
+            "\u0631\u0648\u06cc \u06cc\u06a9 \u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc \u06a9\u0646 \u0648 .tr \u0628\u0641\u0631\u0633\u062a\u060c \u06cc\u0627 \u0628\u0647 \u0634\u06a9\u0644 `.tr <\u0645\u062a\u0646>` \u0627\u0633\u062a\u0641\u0627\u062f\u0647 \u06a9\u0646.\n"
+            "\u0628\u0631\u0627\u06cc \u0632\u0628\u0627\u0646 \u0645\u0642\u0635\u062f: \u0631\u0648\u06cc \u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc \u06a9\u0646 \u0648 `.tr english` \u0628\u0641\u0631\u0633\u062a."
+        )
+        return
+    translated = await _translate(src_text, target)
+    if not translated:
+        await event.reply("\u062a\u0631\u062c\u0645\u0647 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.")
+        return
+    if reply is not None:
+        try:
+            await reply.reply(translated)
+        except Exception:
+            await event.reply(translated)
+    else:
+        try:
+            if event.out:
+                await event.edit(translated)
+            else:
+                await event.reply(translated)
+        except Exception:
+            await event.reply(translated)
 
 @client.on(events.NewMessage(pattern=r"^\.model(?:\s+(?P<provider>\S+)\s+(?P<model>\S+))?\s*$"))
 @admin_only
