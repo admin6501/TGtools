@@ -1216,19 +1216,30 @@ persist="${persist:-N}"
 
 if [[ "$persist" =~ ^[Yy]$ ]]; then
   log "Step 1/2: One-time Telegram login (you may be asked for the login code / 2FA password)..."
-  python3 - <<'LOGIN'
+  # Write the login bootstrap to a real file so input() reads from the terminal.
+  # (Running via "python3 -" consumes stdin, breaking the interactive code prompt.)
+  cat > _tg_login.py <<'LOGIN'
 import os
 from telethon import TelegramClient
-# Credentials are exported by the parent script; no dotenv needed here
-# (load_dotenv() breaks when running via "python3 -" / stdin).
+
 api_id = int(os.environ["TG_API_ID"])
 api_hash = os.environ["TG_API_HASH"]
 phone = os.environ["TG_PHONE_NUMBER"]
-with TelegramClient("session_name", api_id, api_hash) as client:
-    client.start(phone=phone)
-    me = client.get_me()
-    print("Login OK. Logged in as:", getattr(me, "first_name", "user"))
+
+# Do NOT use "with TelegramClient(...) as client" here: its __enter__ calls
+# start() with no phone and re-prompts. Use an explicit client instead.
+client = TelegramClient("session_name", api_id, api_hash)
+client.start(phone=phone)
+me = client.get_me()
+print("Login OK. Logged in as:", getattr(me, "first_name", "user"))
+client.disconnect()
 LOGIN
+  if python3 _tg_login.py; then
+    rm -f _tg_login.py
+  else
+    rm -f _tg_login.py
+    die "Telegram login failed. Please re-run the script and complete the login."
+  fi
 
   WORKDIR="$(pwd)"
   PYBIN="$(command -v python3)"
