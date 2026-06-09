@@ -330,6 +330,48 @@ async def _ai_generate(user_id, text):
         print(f"AI error: {e}")
         return None
 
+# ---- persistent settings (survive restart / service reload) ----
+CONFIG_FILE = "bot_config.json"
+
+def _load_config():
+    global current_provider, current_model, current_persona, custom_prompt
+    global auto_reply_cooldown, default_reply, auto_reply_active, keep_alive_active
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    if not isinstance(cfg, dict):
+        return
+    current_provider = cfg.get("provider", current_provider)
+    current_model = cfg.get("model", current_model)
+    current_persona = cfg.get("persona", current_persona)
+    custom_prompt = cfg.get("custom_prompt", custom_prompt)
+    try:
+        auto_reply_cooldown = int(cfg.get("cooldown", auto_reply_cooldown))
+    except Exception:
+        pass
+    default_reply = cfg.get("default_reply", default_reply)
+    auto_reply_active = bool(cfg.get("auto_reply_active", auto_reply_active))
+    keep_alive_active = bool(cfg.get("keep_alive_active", keep_alive_active))
+
+def _save_config():
+    cfg = {
+        "provider": current_provider,
+        "model": current_model,
+        "persona": current_persona,
+        "custom_prompt": custom_prompt,
+        "cooldown": auto_reply_cooldown,
+        "default_reply": default_reply,
+        "auto_reply_active": auto_reply_active,
+        "keep_alive_active": keep_alive_active,
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 # ---- state ----
 STATE_FILE = "sticker_state.json"
 _state = None
@@ -490,6 +532,15 @@ async def _add_sticker_to_admin_pack(admin_id: int, doc, emoji: str = "\U0001f4d
 
 def is_admin(user_id):
     return str(user_id) in admin_users
+
+# Removes the repeated authorization boilerplate from every command handler.
+def admin_only(handler):
+    async def wrapper(event):
+        if not is_admin(event.sender_id):
+            await event.reply("You are not authorized to use this command.")
+            return
+        return await handler(event)
+    return wrapper
 
 # BUG FIX: safe is_bot - handles None user
 def is_bot(user):
@@ -707,70 +758,63 @@ async def keep_alive():
         await asyncio.sleep(30)
 
 @client.on(events.NewMessage(pattern=r"\.keepalive"))
+@admin_only
 async def start_keep_alive(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global keep_alive_active
     if not keep_alive_active:
         keep_alive_active = True
+        _save_config()
         await event.reply("Keepalive started!")
         asyncio.create_task(keep_alive())
     else:
         await event.reply("Keepalive is already active.")
 
 @client.on(events.NewMessage(pattern=r"\.stopalive"))
+@admin_only
 async def stop_keep_alive(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global keep_alive_active
     if keep_alive_active:
         keep_alive_active = False
+        _save_config()
         await event.reply("Keepalive stopped!")
     else:
         await event.reply("Keepalive is not active.")
 
 @client.on(events.NewMessage(pattern=r"\.startpish"))
+@admin_only
 async def start_auto_reply(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global auto_reply_active
     if not auto_reply_active:
         auto_reply_active = True
+        _save_config()
         await event.reply("Auto-reply started!")
     else:
         await event.reply("Auto-reply is already active.")
 
 @client.on(events.NewMessage(pattern=r"\.stoppish"))
+@admin_only
 async def stop_auto_reply(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global auto_reply_active
     if auto_reply_active:
         auto_reply_active = False
+        _save_config()
         await event.reply("Auto-reply stopped!")
     else:
         await event.reply("Auto-reply is not active.")
 
 @client.on(events.NewMessage(pattern=r"\.edit (.+)"))
+@admin_only
 async def edit_auto_reply(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global default_reply
     default_reply = event.pattern_match.group(1)
+    _save_config()
     await event.reply(f"Auto-reply message updated to: {default_reply}")
 
 # BUG FIX: .help and .status handlers moved BEFORE auto_reply
 # so admin commands in private chats are not swallowed by auto_reply
 @client.on(events.NewMessage(pattern=r"\.help"))
+@admin_only
 async def show_help(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     help_message = (
         "**Available Commands (\u0641\u0642\u0637 \u0627\u062f\u0645\u06cc\u0646):**\n"
         ".keepalive - \u0634\u0631\u0648\u0639 \u0622\u0646\u0644\u0627\u06cc\u0646 \u0646\u06af\u0647\u200c\u062f\u0627\u0634\u062a\u0646 \u0627\u06a9\u0627\u0646\u062a (\u0628\u062f\u0648\u0646 \u0627\u0631\u0633\u0627\u0644 \u067e\u06cc\u0627\u0645).\n"
@@ -788,10 +832,8 @@ async def show_help(event):
     await event.reply(help_message)
 
 @client.on(events.NewMessage(pattern=r"\.status"))
+@admin_only
 async def status(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     status_message = (
         f"**Bot Status:**\n"
         f"Auto-reply: {'Active' if auto_reply_active else 'Inactive'}\n"
@@ -806,10 +848,8 @@ async def status(event):
     await event.reply(status_message)
 
 @client.on(events.NewMessage(pattern=r"\.st(?!\w)"))
+@admin_only
 async def text_to_sticker(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     if (event.raw_text or "").strip() != ".st":
         return
     if not event.is_reply:
@@ -880,10 +920,8 @@ async def text_to_sticker(event):
 
 # ---- AI configuration commands (configurable from Telegram) ----
 @client.on(events.NewMessage(pattern=r"^\.model(?:\s+(?P<provider>\S+)\s+(?P<model>\S+))?\s*$"))
+@admin_only
 async def set_model(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global current_provider, current_model
     provider = event.pattern_match.group("provider")
     model = event.pattern_match.group("model")
@@ -906,13 +944,12 @@ async def set_model(event):
     current_provider = provider
     current_model = model
     _reset_ai_sessions()
+    _save_config()
     await event.reply(f"\u0645\u062f\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc: `{provider} / {model}`")
 
 @client.on(events.NewMessage(pattern=r"^\.persona(?:\s+(?P<key>\S+))?\s*$"))
+@admin_only
 async def set_persona(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global current_persona
     key = event.pattern_match.group("key")
     if not key:
@@ -937,6 +974,7 @@ async def set_persona(event):
             return
         current_persona = "custom"
         _reset_ai_sessions()
+        _save_config()
         await event.reply("\u0634\u062e\u0635\u06cc\u062a \u0631\u0648\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.")
         return
     if key not in PERSONAS:
@@ -944,24 +982,22 @@ async def set_persona(event):
         return
     current_persona = key
     _reset_ai_sessions()
+    _save_config()
     await event.reply(f"\u0634\u062e\u0635\u06cc\u062a \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc: `{key}`")
 
 @client.on(events.NewMessage(pattern=r"^\.setprompt\s+([\s\S]+)$"))
+@admin_only
 async def set_custom_prompt(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global custom_prompt, current_persona
     custom_prompt = event.pattern_match.group(1).strip()
     current_persona = "custom"
     _reset_ai_sessions()
+    _save_config()
     await event.reply("\u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 \u062b\u0628\u062a \u0634\u062f \u0648 \u0634\u062e\u0635\u06cc\u062a \u0631\u0648\u06cc custom \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.")
 
 @client.on(events.NewMessage(pattern=r"^\.cooldown(?:\s+(?P<sec>\d+))?\s*$"))
+@admin_only
 async def set_cooldown(event):
-    if not is_admin(event.sender_id):
-        await event.reply("You are not authorized to use this command.")
-        return
     global auto_reply_cooldown
     sec = event.pattern_match.group("sec")
     if sec is None:
@@ -972,6 +1008,7 @@ async def set_cooldown(event):
         )
         return
     auto_reply_cooldown = int(sec)
+    _save_config()
     if auto_reply_cooldown == 0:
         await event.reply("Cooldown \u063a\u06cc\u0631\u0641\u0639\u0627\u0644 \u0634\u062f (\u0628\u062f\u0648\u0646 \u0645\u062d\u062f\u0648\u062f\u06cc\u062a).")
     else:
@@ -988,6 +1025,9 @@ async def auto_reply(event):
         return
     sender = await event.get_sender()
     if is_bot(sender):
+        return
+    # Do not let the AI reply to admins' own messages
+    if is_admin(event.sender_id):
         return
     # Per-user cooldown to avoid spamming replies / AI usage
     if auto_reply_cooldown > 0:
@@ -1007,8 +1047,11 @@ async def auto_reply(event):
     last_auto_reply_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 async def main():
+    _load_config()
     await client.start(phone=phone_number)
     print("Client Created and Online")
+    if keep_alive_active:
+        asyncio.create_task(keep_alive())
     await client.run_until_disconnected()
 
 client.loop.run_until_complete(main())

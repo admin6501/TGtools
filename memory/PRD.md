@@ -32,6 +32,13 @@
 - `bash -n tg.sh` OK. Generated Python `py_compile` OK. `send_message -> str` confirmed.
 - Live Telegram run is user-side (needs real API ID/HASH/phone session).
 
+## Update (2026-06-09, session 2)
+- Online-status timer changed 60s -> 30s.
+- Added permanent run mode: writes `.env`, one-time interactive login, then installs systemd service `tg-userbot` (Restart=always, auto-start on boot) or falls back to `nohup`. No tmux needed.
+- Settings persistence: `bot_config.json` stores provider/model/persona/custom_prompt/cooldown/default_reply/auto_reply_active/keep_alive_active. Loaded in `main()`, keepalive auto-resumes; saved on every change.
+- AI no longer replies to admin messages (`is_admin` guard in `auto_reply`).
+- Removed duplicate auth boilerplate via `admin_only` decorator (12 handlers).
+
 ## Backlog / Next
 - P1: `.model`/`.persona` persistence across restarts (save to JSON state file).
 - P2: Optional group auto-reply (on mention) — currently PV only by design.
