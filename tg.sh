@@ -162,7 +162,7 @@ preflight() {
     ensure_python_and_pip
   fi
 
-  # 2) Check Python libraries (telethon, pillow)
+  # 2) Check Python libraries (telethon, pillow, python-dotenv)
   local missing_pkgs=()
   if ! py_pkg_installed telethon; then
     missing_pkgs+=("telethon")
@@ -170,12 +170,25 @@ preflight() {
   if ! py_pkg_installed PIL; then
     missing_pkgs+=("pillow")
   fi
+  if ! py_pkg_installed dotenv; then
+    missing_pkgs+=("python-dotenv")
+  fi
 
   if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
     log "Missing Python packages: ${missing_pkgs[*]}. Installing..."
     pip_install "${missing_pkgs[@]}" || die "Failed to install required Python packages."
   else
-    log "All Python dependencies (telethon, pillow) are already installed."
+    log "All Python dependencies (telethon, pillow, python-dotenv) are already installed."
+  fi
+
+  # 2b) Check emergentintegrations (Emergent AI library) from custom index
+  if ! py_pkg_installed emergentintegrations; then
+    log "Installing emergentintegrations (Emergent AI library)..."
+    python3 -m pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ \
+      || python3 -m pip install --user emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ \
+      || warn "Could not install emergentintegrations. AI auto-reply will fall back to the default message."
+  else
+    log "emergentintegrations is already installed."
   fi
 
   # 3) Check curl/wget (needed for font download)
@@ -196,14 +209,14 @@ preflight
 read -r -p "Please enter your API ID: " api_id
 read -r -p "Please enter your API Hash: " api_hash
 read -r -p "Please enter your phone number: " phone_number
-read -r -p "Please enter your channel username: " channel_username
 read -r -p "Please enter admin user IDs (comma separated): " admin_users
+read -r -p "Please enter your Emergent LLM key (sk-emergent-...): " emergent_key
 
 export TG_API_ID="$api_id"
 export TG_API_HASH="$api_hash"
 export TG_PHONE_NUMBER="$phone_number"
-export TG_CHANNEL_USERNAME="$channel_username"
 export TG_ADMIN_USERS="$admin_users"
+export TG_EMERGENT_LLM_KEY="$emergent_key"
 
 cat > "$PYTHON_FILE" <<'PY'
 from telethon import TelegramClient, events, utils, errors
@@ -225,6 +238,16 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageChops
 from telethon.tl.functions.messages import GetStickerSetRequest
 from telethon.tl.functions.stickers import CreateStickerSetRequest, AddStickerToSetRequest
 from telethon.tl.types import InputStickerSetShortName, InputStickerSetItem
+from telethon.tl.functions.account import UpdateStatusRequest
+
+from dotenv import load_dotenv
+load_dotenv()
+
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    _AI_AVAILABLE = True
+except Exception:
+    _AI_AVAILABLE = False
 
 
 def _env(name: str, required: bool = True) -> str:
@@ -238,7 +261,7 @@ def _env(name: str, required: bool = True) -> str:
 api_id = int(_env("TG_API_ID"))
 api_hash = _env("TG_API_HASH")
 phone_number = _env("TG_PHONE_NUMBER")
-channel_username = _env("TG_CHANNEL_USERNAME")
+EMERGENT_LLM_KEY = _env("TG_EMERGENT_LLM_KEY", required=False)
 
 admin_users_raw = _env("TG_ADMIN_USERS")
 admin_users = [x.strip() for x in admin_users_raw.split(",") if x.strip()]
@@ -250,6 +273,57 @@ auto_reply_active = False
 default_reply = "\u0635\u0628\u0648\u0631 \u0628\u0627\u0634\u06cc\u062f \u062f\u0631 \u0627\u0633\u0631\u0639 \u0648\u0642\u062a \u067e\u0627\u0633\u062e\u06af\u0648 \u0647\u0633\u062a\u0645."
 auto_reply_count = 0
 last_auto_reply_time = None
+
+# ---- AI auto-reply config ----
+current_provider = "anthropic"
+current_model = "claude-sonnet-4-6"
+
+ALLOWED_MODELS = {
+    "openai": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"],
+    "anthropic": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+    "gemini": ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+}
+
+PERSONAS = {
+    "formal": "\u062a\u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u0634\u062e\u0635\u06cc \u0635\u0627\u062d\u0628 \u0627\u06cc\u0646 \u0627\u06a9\u0627\u0646\u062a \u062a\u0644\u06af\u0631\u0627\u0645 \u0647\u0633\u062a\u06cc \u0648 \u062f\u0631 \u0646\u0628\u0648\u062f \u0627\u0648 \u067e\u0627\u0633\u062e \u0645\u06cc\u200c\u062f\u0647\u06cc. \u0628\u0627 \u0644\u062d\u0646\u06cc \u0631\u0633\u0645\u06cc\u060c \u0645\u0648\u062f\u0628\u0627\u0646\u0647 \u0648 \u0645\u062d\u062a\u0631\u0645\u0627\u0646\u0647 \u0648 \u0641\u0642\u0637 \u0628\u0647 \u0632\u0628\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc \u067e\u0627\u0633\u062e \u0628\u062f\u0647. \u06a9\u0648\u062a\u0627\u0647 \u0648 \u062f\u0642\u06cc\u0642 \u062c\u0648\u0627\u0628 \u0628\u062f\u0647.",
+    "friendly": "\u062a\u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u0634\u062e\u0635\u06cc \u0635\u0627\u062d\u0628 \u0627\u06cc\u0646 \u0627\u06a9\u0627\u0646\u062a \u062a\u0644\u06af\u0631\u0627\u0645 \u0647\u0633\u062a\u06cc \u0648 \u062f\u0631 \u0646\u0628\u0648\u062f \u0627\u0648 \u067e\u0627\u0633\u062e \u0645\u06cc\u200c\u062f\u0647\u06cc. \u0628\u0627 \u0644\u062d\u0646\u06cc \u062e\u0648\u062f\u0645\u0648\u0646\u06cc\u060c \u06af\u0631\u0645 \u0648 \u062f\u0648\u0633\u062a\u0627\u0646\u0647 \u0648 \u0641\u0642\u0637 \u0628\u0647 \u0632\u0628\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc \u067e\u0627\u0633\u062e \u0628\u062f\u0647. \u06a9\u0648\u062a\u0627\u0647 \u0648 \u0635\u0645\u06cc\u0645\u06cc \u062c\u0648\u0627\u0628 \u0628\u062f\u0647.",
+    "professional": "\u062a\u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0635\u0627\u062d\u0628 \u0627\u06cc\u0646 \u0627\u06a9\u0627\u0646\u062a \u062a\u0644\u06af\u0631\u0627\u0645 \u0647\u0633\u062a\u06cc. \u0628\u0627 \u0644\u062d\u0646\u06cc \u062d\u0631\u0641\u0647\u200c\u0627\u06cc\u060c \u0645\u062e\u062a\u0635\u0631 \u0648 \u0631\u0627\u0647\u200c\u06af\u0634\u0627 \u0648 \u0641\u0642\u0637 \u0628\u0647 \u0632\u0628\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc \u067e\u0627\u0633\u062e \u0628\u062f\u0647. \u0627\u06af\u0631 \u0633\u0648\u0627\u0644 \u0646\u06cc\u0627\u0632 \u0628\u0647 \u062f\u062e\u0627\u0644\u062a \u0634\u062e\u0635 \u0627\u0635\u0644\u06cc \u062f\u0627\u0631\u062f\u060c \u0628\u06af\u0648 \u06a9\u0647 \u062f\u0631 \u0627\u0648\u0644\u06cc\u0646 \u0641\u0631\u0635\u062a \u067e\u0627\u0633\u062e \u062f\u0627\u062f\u0647 \u0645\u06cc\u200c\u0634\u0648\u062f.",
+    "witty": "\u062a\u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u0634\u062e\u0635\u06cc \u0635\u0627\u062d\u0628 \u0627\u06cc\u0646 \u0627\u06a9\u0627\u0646\u062a \u062a\u0644\u06af\u0631\u0627\u0645 \u0647\u0633\u062a\u06cc \u0648 \u062f\u0631 \u0646\u0628\u0648\u062f \u0627\u0648 \u067e\u0627\u0633\u062e \u0645\u06cc\u200c\u062f\u0647\u06cc. \u0628\u0627 \u0644\u062d\u0646\u06cc \u0628\u0627\u0646\u0645\u06a9\u060c \u0628\u0627\u0647\u0648\u0634 \u0648 \u06a9\u0645\u06cc \u0634\u0648\u062e \u0648 \u0641\u0642\u0637 \u0628\u0647 \u0632\u0628\u0627\u0646 \u0641\u0627\u0631\u0633\u06cc \u067e\u0627\u0633\u062e \u0628\u062f\u0647. \u06a9\u0648\u062a\u0627\u0647 \u062c\u0648\u0627\u0628 \u0628\u062f\u0647.",
+}
+current_persona = "friendly"
+custom_prompt = ""
+
+# user_id -> LlmChat instance (per-user multi-turn session)
+ai_sessions = {}
+
+def _system_prompt():
+    if current_persona == "custom" and custom_prompt.strip():
+        return custom_prompt.strip()
+    return PERSONAS.get(current_persona, PERSONAS["friendly"])
+
+def _reset_ai_sessions():
+    global ai_sessions
+    ai_sessions = {}
+
+async def _ai_generate(user_id, text):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        return None
+    try:
+        chat = ai_sessions.get(user_id)
+        if chat is None:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"tg_{user_id}",
+                system_message=_system_prompt(),
+            ).with_model(current_provider, current_model)
+            ai_sessions[user_id] = chat
+        resp = await chat.send_message(UserMessage(text=text))
+        if isinstance(resp, str):
+            return resp.strip()
+        return str(resp).strip()
+    except Exception as e:
+        print(f"AI error: {e}")
+        return None
 
 # ---- state ----
 STATE_FILE = "sticker_state.json"
@@ -617,10 +691,15 @@ def build_premium_text_sticker(text: str, size: int = 512) -> Image.Image:
 # ---------- end renderer ----------
 
 async def keep_alive():
+    # Keep the account shown as "online" by periodically refreshing the online
+    # status. No messages are sent to any channel/chat.
     global keep_alive_active
     while keep_alive_active:
-        await client.send_message(channel_username, "Keeping the channel active")
-        await asyncio.sleep(5)
+        try:
+            await client(UpdateStatusRequest(offline=False))
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 @client.on(events.NewMessage(pattern=r"\.keepalive"))
 async def start_keep_alive(event):
@@ -689,13 +768,16 @@ async def show_help(event):
         return
     help_message = (
         "**Available Commands:**\n"
-        ".keepalive - Start keepalive messages.\n"
-        ".stopalive - Stop keepalive messages.\n"
-        ".startpish - Start auto-reply.\n"
-        ".stoppish - Stop auto-reply.\n"
-        ".edit <message> - Edit auto-reply message.\n"
-        ".st - Convert replied text to sticker.\n"
-        ".status - Show bot status.\n"
+        ".keepalive - \u0634\u0631\u0648\u0639 \u0622\u0646\u0644\u0627\u06cc\u0646 \u0646\u06af\u0647\u200c\u062f\u0627\u0634\u062a\u0646 \u0627\u06a9\u0627\u0646\u062a (\u0628\u062f\u0648\u0646 \u0627\u0631\u0633\u0627\u0644 \u067e\u06cc\u0627\u0645).\n"
+        ".stopalive - \u062a\u0648\u0642\u0641 \u0622\u0646\u0644\u0627\u06cc\u0646 \u0646\u06af\u0647\u200c\u062f\u0627\u0634\u062a\u0646.\n"
+        ".startpish - \u0634\u0631\u0648\u0639 \u067e\u0627\u0633\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u0628\u0627 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc.\n"
+        ".stoppish - \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e \u062e\u0648\u062f\u06a9\u0627\u0631.\n"
+        ".model - \u0646\u0645\u0627\u06cc\u0634/\u062a\u063a\u06cc\u06cc\u0631 \u0645\u062f\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc.\n"
+        ".persona - \u0646\u0645\u0627\u06cc\u0634/\u062a\u063a\u06cc\u06cc\u0631 \u0634\u062e\u0635\u06cc\u062a \u0648 \u0644\u062d\u0646 \u067e\u0627\u0633\u062e.\n"
+        ".setprompt <\u0645\u062a\u0646> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647.\n"
+        ".edit <message> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u06cc\u0627\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 (\u0648\u0642\u062a\u06cc AI \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a).\n"
+        ".st - \u062a\u0628\u062f\u06cc\u0644 \u0645\u062a\u0646 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0628\u0647 \u0627\u0633\u062a\u06cc\u06a9\u0631.\n"
+        ".status - \u0646\u0645\u0627\u06cc\u0634 \u0648\u0636\u0639\u06cc\u062a \u0631\u0628\u0627\u062a.\n"
     )
     await event.reply(help_message)
 
@@ -708,6 +790,9 @@ async def status(event):
         f"**Bot Status:**\n"
         f"Auto-reply: {'Active' if auto_reply_active else 'Inactive'}\n"
         f"Keepalive: {'Active' if keep_alive_active else 'Inactive'}\n"
+        f"AI model: {current_provider} / {current_model}\n"
+        f"Persona: {current_persona}\n"
+        f"AI available: {'Yes' if (_AI_AVAILABLE and EMERGENT_LLM_KEY) else 'No'}\n"
         f"Auto-reply count: {auto_reply_count}\n"
         f"Last auto-reply time: {last_auto_reply_time if last_auto_reply_time else 'No replies yet'}"
     )
@@ -786,15 +871,103 @@ async def text_to_sticker(event):
             except Exception:
                 pass
 
+# ---- AI configuration commands (configurable from Telegram) ----
+@client.on(events.NewMessage(pattern=r"^\.model(?:\s+(?P<provider>\S+)\s+(?P<model>\S+))?\s*$"))
+async def set_model(event):
+    if not is_admin(event.sender_id):
+        return
+    global current_provider, current_model
+    provider = event.pattern_match.group("provider")
+    model = event.pattern_match.group("model")
+    if not provider:
+        lines = [f"**\u0645\u062f\u0644 \u0641\u0639\u0644\u06cc:** `{current_provider} / {current_model}`", "", "**\u0645\u062f\u0644\u200c\u0647\u0627\u06cc \u0645\u0648\u062c\u0648\u062f:**"]
+        for prov, models in ALLOWED_MODELS.items():
+            lines.append(f"\u2022 **{prov}**: " + ", ".join(f"`{m}`" for m in models))
+        lines.append("")
+        lines.append("\u0628\u0631\u0627\u06cc \u062a\u063a\u06cc\u06cc\u0631: `.model <provider> <model>`")
+        lines.append("\u0645\u062b\u0627\u0644: `.model openai gpt-5.4`")
+        await event.reply("\n".join(lines))
+        return
+    provider = provider.lower()
+    if provider not in ALLOWED_MODELS:
+        await event.reply("\u067e\u0631\u0648\u0648\u0627\u06cc\u062f\u0631 \u0646\u0627\u0645\u0639\u062a\u0628\u0631. \u06cc\u06a9\u06cc \u0627\u0632: " + ", ".join(ALLOWED_MODELS.keys()))
+        return
+    if model not in ALLOWED_MODELS[provider]:
+        await event.reply(f"\u0645\u062f\u0644 \u0646\u0627\u0645\u0639\u062a\u0628\u0631 \u0628\u0631\u0627\u06cc {provider}.\n\u0645\u062f\u0644\u200c\u0647\u0627\u06cc \u0645\u062c\u0627\u0632: " + ", ".join(ALLOWED_MODELS[provider]))
+        return
+    current_provider = provider
+    current_model = model
+    _reset_ai_sessions()
+    await event.reply(f"\u0645\u062f\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc: `{provider} / {model}`")
+
+@client.on(events.NewMessage(pattern=r"^\.persona(?:\s+(?P<key>\S+))?\s*$"))
+async def set_persona(event):
+    if not is_admin(event.sender_id):
+        return
+    global current_persona
+    key = event.pattern_match.group("key")
+    if not key:
+        names = {
+            "formal": "\u0631\u0633\u0645\u06cc \u0648 \u0645\u0648\u062f\u0628\u0627\u0646\u0647",
+            "friendly": "\u062e\u0648\u062f\u0645\u0648\u0646\u06cc \u0648 \u062f\u0648\u0633\u062a\u0627\u0646\u0647",
+            "professional": "\u062d\u0631\u0641\u0647\u200c\u0627\u06cc/\u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc",
+            "witty": "\u0628\u0627\u0646\u0645\u06a9 \u0648 \u0634\u0648\u062e",
+            "custom": "\u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 (\u0628\u0627 .setprompt)",
+        }
+        lines = [f"**\u0634\u062e\u0635\u06cc\u062a \u0641\u0639\u0644\u06cc:** `{current_persona}`", "", "**\u0634\u062e\u0635\u06cc\u062a\u200c\u0647\u0627\u06cc \u0645\u0648\u062c\u0648\u062f:**"]
+        for k, v in names.items():
+            lines.append(f"\u2022 `{k}` \u2014 {v}")
+        lines.append("")
+        lines.append("\u0628\u0631\u0627\u06cc \u062a\u063a\u06cc\u06cc\u0631: `.persona <key>` \u0645\u062b\u0644 `.persona formal`")
+        await event.reply("\n".join(lines))
+        return
+    key = key.lower()
+    if key == "custom":
+        if not custom_prompt.strip():
+            await event.reply("\u0627\u0648\u0644 \u0628\u0627 \u062f\u0633\u062a\u0648\u0631 `.setprompt <\u0645\u062a\u0646>` \u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647\u062a \u0631\u0648 \u0628\u0630\u0627\u0631.")
+            return
+        current_persona = "custom"
+        _reset_ai_sessions()
+        await event.reply("\u0634\u062e\u0635\u06cc\u062a \u0631\u0648\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.")
+        return
+    if key not in PERSONAS:
+        await event.reply("\u0634\u062e\u0635\u06cc\u062a \u0646\u0627\u0645\u0639\u062a\u0628\u0631. \u0645\u0648\u062c\u0648\u062f: " + ", ".join(list(PERSONAS.keys()) + ["custom"]))
+        return
+    current_persona = key
+    _reset_ai_sessions()
+    await event.reply(f"\u0634\u062e\u0635\u06cc\u062a \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc: `{key}`")
+
+@client.on(events.NewMessage(pattern=r"^\.setprompt\s+([\s\S]+)$"))
+async def set_custom_prompt(event):
+    if not is_admin(event.sender_id):
+        return
+    global custom_prompt, current_persona
+    custom_prompt = event.pattern_match.group(1).strip()
+    current_persona = "custom"
+    _reset_ai_sessions()
+    await event.reply("\u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 \u062b\u0628\u062a \u0634\u062f \u0648 \u0634\u062e\u0635\u06cc\u062a \u0631\u0648\u06cc custom \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.")
+
 # BUG FIX: auto_reply MUST be the LAST handler so it doesn't intercept admin commands
 @client.on(events.NewMessage(incoming=True))
 async def auto_reply(event):
     global auto_reply_active, auto_reply_count, last_auto_reply_time
+    if not auto_reply_active or not event.is_private:
+        return
+    # Never auto-reply to command messages
+    if (event.raw_text or "").strip().startswith("."):
+        return
     sender = await event.get_sender()
-    if auto_reply_active and event.is_private and not is_bot(sender):
-        await event.reply(default_reply)
-        auto_reply_count += 1
-        last_auto_reply_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if is_bot(sender):
+        return
+    text = (event.raw_text or "").strip()
+    reply_text = None
+    if text:
+        reply_text = await _ai_generate(event.sender_id, text)
+    if not reply_text:
+        reply_text = default_reply
+    await event.reply(reply_text)
+    auto_reply_count += 1
+    last_auto_reply_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 async def main():
     await client.start(phone=phone_number)
