@@ -221,6 +221,7 @@ export TG_EMERGENT_LLM_KEY="$emergent_key"
 cat > "$PYTHON_FILE" <<'PY'
 from telethon import TelegramClient, events, utils, errors
 import asyncio
+import time
 from datetime import datetime
 import os
 import tempfile
@@ -292,6 +293,10 @@ PERSONAS = {
 }
 current_persona = "friendly"
 custom_prompt = ""
+
+# Auto-reply cooldown (seconds) per user. 0 = no limit.
+auto_reply_cooldown = 0
+_user_last_reply = {}
 
 # user_id -> LlmChat instance (per-user multi-turn session)
 ai_sessions = {}
@@ -767,7 +772,7 @@ async def show_help(event):
         await event.reply("You are not authorized to use this command.")
         return
     help_message = (
-        "**Available Commands:**\n"
+        "**Available Commands (\u0641\u0642\u0637 \u0627\u062f\u0645\u06cc\u0646):**\n"
         ".keepalive - \u0634\u0631\u0648\u0639 \u0622\u0646\u0644\u0627\u06cc\u0646 \u0646\u06af\u0647\u200c\u062f\u0627\u0634\u062a\u0646 \u0627\u06a9\u0627\u0646\u062a (\u0628\u062f\u0648\u0646 \u0627\u0631\u0633\u0627\u0644 \u067e\u06cc\u0627\u0645).\n"
         ".stopalive - \u062a\u0648\u0642\u0641 \u0622\u0646\u0644\u0627\u06cc\u0646 \u0646\u06af\u0647\u200c\u062f\u0627\u0634\u062a\u0646.\n"
         ".startpish - \u0634\u0631\u0648\u0639 \u067e\u0627\u0633\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u0628\u0627 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc.\n"
@@ -775,6 +780,7 @@ async def show_help(event):
         ".model - \u0646\u0645\u0627\u06cc\u0634/\u062a\u063a\u06cc\u06cc\u0631 \u0645\u062f\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc.\n"
         ".persona - \u0646\u0645\u0627\u06cc\u0634/\u062a\u063a\u06cc\u06cc\u0631 \u0634\u062e\u0635\u06cc\u062a \u0648 \u0644\u062d\u0646 \u067e\u0627\u0633\u062e.\n"
         ".setprompt <\u0645\u062a\u0646> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647.\n"
+        ".cooldown <\u062b\u0627\u0646\u06cc\u0647> - \u0641\u0627\u0635\u0644\u0647\u200c\u06cc \u0632\u0645\u0627\u0646\u06cc \u067e\u0627\u0633\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u0628\u0631\u0627\u06cc \u0647\u0631 \u06a9\u0627\u0631\u0628\u0631.\n"
         ".edit <message> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u06cc\u0627\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 (\u0648\u0642\u062a\u06cc AI \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a).\n"
         ".st - \u062a\u0628\u062f\u06cc\u0644 \u0645\u062a\u0646 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0628\u0647 \u0627\u0633\u062a\u06cc\u06a9\u0631.\n"
         ".status - \u0646\u0645\u0627\u06cc\u0634 \u0648\u0636\u0639\u06cc\u062a \u0631\u0628\u0627\u062a.\n"
@@ -792,6 +798,7 @@ async def status(event):
         f"Keepalive: {'Active' if keep_alive_active else 'Inactive'}\n"
         f"AI model: {current_provider} / {current_model}\n"
         f"Persona: {current_persona}\n"
+        f"Cooldown: {auto_reply_cooldown}s\n"
         f"AI available: {'Yes' if (_AI_AVAILABLE and EMERGENT_LLM_KEY) else 'No'}\n"
         f"Auto-reply count: {auto_reply_count}\n"
         f"Last auto-reply time: {last_auto_reply_time if last_auto_reply_time else 'No replies yet'}"
@@ -875,6 +882,7 @@ async def text_to_sticker(event):
 @client.on(events.NewMessage(pattern=r"^\.model(?:\s+(?P<provider>\S+)\s+(?P<model>\S+))?\s*$"))
 async def set_model(event):
     if not is_admin(event.sender_id):
+        await event.reply("You are not authorized to use this command.")
         return
     global current_provider, current_model
     provider = event.pattern_match.group("provider")
@@ -903,6 +911,7 @@ async def set_model(event):
 @client.on(events.NewMessage(pattern=r"^\.persona(?:\s+(?P<key>\S+))?\s*$"))
 async def set_persona(event):
     if not is_admin(event.sender_id):
+        await event.reply("You are not authorized to use this command.")
         return
     global current_persona
     key = event.pattern_match.group("key")
@@ -940,12 +949,33 @@ async def set_persona(event):
 @client.on(events.NewMessage(pattern=r"^\.setprompt\s+([\s\S]+)$"))
 async def set_custom_prompt(event):
     if not is_admin(event.sender_id):
+        await event.reply("You are not authorized to use this command.")
         return
     global custom_prompt, current_persona
     custom_prompt = event.pattern_match.group(1).strip()
     current_persona = "custom"
     _reset_ai_sessions()
     await event.reply("\u067e\u0631\u0627\u0645\u067e\u062a \u062f\u0644\u062e\u0648\u0627\u0647 \u062b\u0628\u062a \u0634\u062f \u0648 \u0634\u062e\u0635\u06cc\u062a \u0631\u0648\u06cc custom \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.")
+
+@client.on(events.NewMessage(pattern=r"^\.cooldown(?:\s+(?P<sec>\d+))?\s*$"))
+async def set_cooldown(event):
+    if not is_admin(event.sender_id):
+        await event.reply("You are not authorized to use this command.")
+        return
+    global auto_reply_cooldown
+    sec = event.pattern_match.group("sec")
+    if sec is None:
+        await event.reply(
+            f"**Cooldown \u0641\u0639\u0644\u06cc:** {auto_reply_cooldown} \u062b\u0627\u0646\u06cc\u0647\n"
+            "\u0628\u0631\u0627\u06cc \u062a\u063a\u06cc\u06cc\u0631: `.cooldown <\u062b\u0627\u0646\u06cc\u0647>`\n"
+            "\u0645\u062b\u0627\u0644: `.cooldown 30` (\u0639\u062f\u062f 0 \u06cc\u0639\u0646\u06cc \u0628\u062f\u0648\u0646 \u0645\u062d\u062f\u0648\u062f\u06cc\u062a)"
+        )
+        return
+    auto_reply_cooldown = int(sec)
+    if auto_reply_cooldown == 0:
+        await event.reply("Cooldown \u063a\u06cc\u0631\u0641\u0639\u0627\u0644 \u0634\u062f (\u0628\u062f\u0648\u0646 \u0645\u062d\u062f\u0648\u062f\u06cc\u062a).")
+    else:
+        await event.reply(f"Cooldown \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc {auto_reply_cooldown} \u062b\u0627\u0646\u06cc\u0647 \u0628\u0631\u0627\u06cc \u0647\u0631 \u06a9\u0627\u0631\u0628\u0631.")
 
 # BUG FIX: auto_reply MUST be the LAST handler so it doesn't intercept admin commands
 @client.on(events.NewMessage(incoming=True))
@@ -959,6 +989,13 @@ async def auto_reply(event):
     sender = await event.get_sender()
     if is_bot(sender):
         return
+    # Per-user cooldown to avoid spamming replies / AI usage
+    if auto_reply_cooldown > 0:
+        now = time.time()
+        last = _user_last_reply.get(event.sender_id, 0)
+        if now - last < auto_reply_cooldown:
+            return
+        _user_last_reply[event.sender_id] = now
     text = (event.raw_text or "").strip()
     reply_text = None
     if text:
