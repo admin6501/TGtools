@@ -704,7 +704,7 @@ async def keep_alive():
             await client(UpdateStatusRequest(offline=False))
         except Exception:
             pass
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
 
 @client.on(events.NewMessage(pattern=r"\.keepalive"))
 async def start_keep_alive(event):
@@ -1015,4 +1015,87 @@ client.loop.run_until_complete(main())
 PY
 
 log "Python file '${PYTHON_FILE}' has been created."
-python3 "$PYTHON_FILE"
+
+# Persist credentials to .env so the bot can run headless (systemd/nohup) without re-exporting.
+cat > .env <<EOF
+TG_API_ID=${api_id}
+TG_API_HASH=${api_hash}
+TG_PHONE_NUMBER=${phone_number}
+TG_ADMIN_USERS=${admin_users}
+TG_EMERGENT_LLM_KEY=${emergent_key}
+EOF
+chmod 600 .env 2>/dev/null || true
+log "Saved credentials to .env (used for headless runs)."
+
+echo
+read -r -p "Run the bot permanently in the background? (no tmux/screen needed) [y/N]: " persist
+persist="${persist:-N}"
+
+if [[ "$persist" =~ ^[Yy]$ ]]; then
+  log "Step 1/2: One-time Telegram login (you may be asked for the login code / 2FA password)..."
+  python3 - <<'LOGIN'
+import os
+from telethon import TelegramClient
+from dotenv import load_dotenv
+load_dotenv()
+api_id = int(os.environ["TG_API_ID"])
+api_hash = os.environ["TG_API_HASH"]
+phone = os.environ["TG_PHONE_NUMBER"]
+with TelegramClient("session_name", api_id, api_hash) as client:
+    client.start(phone=phone)
+    me = client.get_me()
+    print("Login OK. Logged in as:", getattr(me, "first_name", "user"))
+LOGIN
+
+  WORKDIR="$(pwd)"
+  PYBIN="$(command -v python3)"
+
+  can_root=false
+  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "$SUDO" ]]; then
+    can_root=true
+  fi
+
+  if have systemctl && $can_root && ! is_termux; then
+    SERVICE_NAME="tg-userbot"
+    RUN_USER="$(id -un)"
+    log "Step 2/2: Installing systemd service '${SERVICE_NAME}'..."
+    $SUDO tee /etc/systemd/system/${SERVICE_NAME}.service >/dev/null <<EOF
+[Unit]
+Description=Telegram Userbot (tg.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${WORKDIR}
+ExecStart=${PYBIN} ${WORKDIR}/${PYTHON_FILE}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 || true
+    $SUDO systemctl restart ${SERVICE_NAME}
+    log "Done! The bot now runs as a service and auto-starts on reboot."
+    log "Useful commands:"
+    log "  Status: ${SUDO} systemctl status ${SERVICE_NAME}"
+    log "  Logs:   ${SUDO} journalctl -u ${SERVICE_NAME} -f"
+    log "  Stop:   ${SUDO} systemctl stop ${SERVICE_NAME}"
+  else
+    log "Step 2/2: systemd not available. Starting in background with nohup..."
+    nohup "$PYBIN" "${WORKDIR}/${PYTHON_FILE}" > userbot.log 2>&1 &
+    echo $! > userbot.pid
+    log "Done! The bot is running in the background (PID $(cat userbot.pid))."
+    log "  Logs: tail -f ${WORKDIR}/userbot.log"
+    log "  Stop: kill \$(cat ${WORKDIR}/userbot.pid)"
+    if is_termux; then
+      log "Termux tip: run 'termux-wake-lock' and install Termux:Boot to survive reboots."
+    fi
+  fi
+else
+  log "Starting the bot in the foreground (press Ctrl+C to stop)..."
+  python3 "$PYTHON_FILE"
+fi
