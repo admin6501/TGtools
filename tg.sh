@@ -233,6 +233,7 @@ import re
 import random
 import string
 import hashlib
+import base64
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageChops
 
@@ -245,7 +246,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
     _AI_AVAILABLE = True
 except Exception:
     _AI_AVAILABLE = False
@@ -328,6 +329,34 @@ async def _ai_generate(user_id, text):
         return str(resp).strip()
     except Exception as e:
         print(f"AI error: {e}")
+        return None
+
+# Convert an image (base64) to text using the configured vision-capable model.
+async def _image_to_text(image_b64):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        return None
+    try:
+        ocr_chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"ocr_{int(time.time() * 1000)}",
+            system_message=(
+                "\u062a\u0648 \u06cc\u06a9 \u0627\u0628\u0632\u0627\u0631 \u0627\u0633\u062a\u062e\u0631\u0627\u062c \u0645\u062a\u0646 \u0648 \u062a\u0648\u0635\u06cc\u0641 \u062a\u0635\u0648\u06cc\u0631 \u0647\u0633\u062a\u06cc."
+            ),
+        ).with_model(current_provider, current_model)
+        prompt = (
+            "\u0627\u06af\u0631 \u062f\u0631 \u0627\u06cc\u0646 \u062a\u0635\u0648\u06cc\u0631 \u0645\u062a\u0646\u06cc \u0648\u062c\u0648\u062f \u062f\u0627\u0631\u062f\u060c "
+            "\u0622\u0646 \u0631\u0627 \u062f\u0642\u06cc\u0642 \u0648 \u06a9\u0627\u0645\u0644 \u0648 \u0628\u062f\u0648\u0646 \u062a\u063a\u06cc\u06cc\u0631 \u0627\u0633\u062a\u062e\u0631\u0627\u062c \u06a9\u0646. "
+            "\u0627\u06af\u0631 \u0645\u062a\u0646\u06cc \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f\u060c \u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0635\u0648\u06cc\u0631 \u0631\u0627 \u0628\u0647 \u0641\u0627\u0631\u0633\u06cc \u062a\u0648\u0635\u06cc\u0641 \u06a9\u0646. "
+            "\u0641\u0642\u0637 \u0646\u062a\u06cc\u062c\u0647\u200c\u06cc \u0646\u0647\u0627\u06cc\u06cc \u0631\u0627 \u0628\u062f\u0647."
+        )
+        resp = await ocr_chat.send_message(
+            UserMessage(text=prompt, file_contents=[ImageContent(image_base64=image_b64)])
+        )
+        if isinstance(resp, str):
+            return resp.strip()
+        return str(resp).strip()
+    except Exception as e:
+        print(f"OCR error: {e}")
         return None
 
 # ---- persistent settings (survive restart / service reload) ----
@@ -827,6 +856,7 @@ async def show_help(event):
         ".cooldown <\u062b\u0627\u0646\u06cc\u0647> - \u0641\u0627\u0635\u0644\u0647\u200c\u06cc \u0632\u0645\u0627\u0646\u06cc \u067e\u0627\u0633\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u0628\u0631\u0627\u06cc \u0647\u0631 \u06a9\u0627\u0631\u0628\u0631.\n"
         ".edit <message> - \u062a\u0646\u0638\u06cc\u0645 \u067e\u06cc\u0627\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 (\u0648\u0642\u062a\u06cc AI \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a).\n"
         ".st - \u062a\u0628\u062f\u06cc\u0644 \u0645\u062a\u0646 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0628\u0647 \u0627\u0633\u062a\u06cc\u06a9\u0631.\n"
+        ".ocr - \u0631\u06cc\u067e\u0644\u0627\u06cc \u0631\u0648\u06cc \u0639\u06a9\u0633: \u0627\u0633\u062a\u062e\u0631\u0627\u062c \u0645\u062a\u0646/\u062a\u0648\u0635\u06cc\u0641 \u0648 \u0627\u0631\u0633\u0627\u0644 \u0628\u0647 Saved Messages.\n"
         ".status - \u0646\u0645\u0627\u06cc\u0634 \u0648\u0636\u0639\u06cc\u062a \u0631\u0628\u0627\u062a.\n"
     )
     await event.reply(help_message)
@@ -919,6 +949,53 @@ async def text_to_sticker(event):
                 pass
 
 # ---- AI configuration commands (configurable from Telegram) ----
+@client.on(events.NewMessage(pattern=r"^\.ocr(?:\s|$)"))
+@admin_only
+async def image_to_text_cmd(event):
+    if not event.is_reply:
+        await event.reply("\u0631\u0648\u06cc \u06cc\u06a9 \u0639\u06a9\u0633 \u0631\u06cc\u067e\u0644\u0627\u06cc \u06a9\u0646 \u0648 \u0628\u0639\u062f .ocr \u0628\u0641\u0631\u0633\u062a.")
+        return
+    reply = await event.get_reply_message()
+    has_image = bool(
+        reply and (
+            reply.photo
+            or (reply.document and (getattr(reply.document, "mime_type", "") or "").startswith("image/"))
+        )
+    )
+    if not has_image:
+        await event.reply("\u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0639\u06a9\u0633 \u0646\u062f\u0627\u0631\u062f.")
+        return
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a (\u06a9\u0644\u06cc\u062f Emergent \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647).")
+        return
+    try:
+        data = await reply.download_media(file=bytes)
+    except Exception:
+        data = None
+    if not data:
+        await event.reply("\u062f\u0627\u0646\u0644\u0648\u062f \u0639\u06a9\u0633 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.")
+        return
+    image_b64 = base64.b64encode(data).decode("utf-8")
+    text = await _image_to_text(image_b64)
+    if not text:
+        await event.reply("\u0627\u0633\u062a\u062e\u0631\u0627\u062c \u0645\u062a\u0646 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.")
+        return
+    full = "\U0001f4dd \u0645\u062a\u0646 \u0627\u0633\u062a\u062e\u0631\u0627\u062c\u200c\u0634\u062f\u0647 \u0627\u0632 \u0639\u06a9\u0633:\n\n" + text
+    # Telegram message limit is ~4096 chars; chunk long results.
+    for i in range(0, len(full), 4000):
+        await client.send_message("me", full[i:i + 4000])
+    confirm = "\u2705 \u0645\u062a\u0646 \u0639\u06a9\u0633 \u0627\u0633\u062a\u062e\u0631\u0627\u062c \u0648 \u0628\u0647 Saved Messages \u0627\u0631\u0633\u0627\u0644 \u0634\u062f."
+    try:
+        if event.out:
+            await event.edit(confirm)
+        else:
+            await event.reply(confirm)
+    except Exception:
+        try:
+            await event.reply(confirm)
+        except Exception:
+            pass
+
 @client.on(events.NewMessage(pattern=r"^\.model(?:\s+(?P<provider>\S+)\s+(?P<model>\S+))?\s*$"))
 @admin_only
 async def set_model(event):
