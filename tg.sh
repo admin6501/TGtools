@@ -226,6 +226,7 @@ import time
 from datetime import datetime
 import os
 import sys
+import urllib.request
 import tempfile
 import textwrap
 import shutil
@@ -1326,14 +1327,52 @@ async def _music_search(query, limit=5):
     return await asyncio.to_thread(_run)
 
 
+# Platforms whose links can't be fetched directly by yt-dlp (DRM streams).
+# For these we read the track name + artist from the page and search YouTube.
+NON_DIRECT_DOMAINS = ("spotify.com", "music.apple.com", "tidal.com", "deezer.com")
+
+
+def _extract_track_query(url):
+    """Read 'Title Artist' from a music page's metadata. Returns a query or None."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore")
+    except Exception as e:
+        print(f"Track meta error: {e}")
+        return None
+
+    def meta(prop):
+        m = (re.search(r'<meta[^>]+property="' + re.escape(prop) + r'"[^>]+content="([^"]*)"', html)
+             or re.search(r'<meta[^>]+name="' + re.escape(prop) + r'"[^>]+content="([^"]*)"', html))
+        return (m.group(1).strip() if m else "")
+
+    title = meta("og:title")
+    artist = meta("music:musician_description")
+    if not artist:
+        desc = meta("og:description")
+        if "\u00b7" in desc:
+            artist = desc.split("\u00b7")[0].strip()
+    q = (title + " " + artist).strip()
+    return q or None
+
+
 async def _music_download(url):
-    """Download audio as mp3; return (filepath, title) or (None, None)."""
+    """Download audio as mp3; return (filepath, title) or (None, None).
+    Spotify/Apple/Tidal/Deezer links can't be fetched directly, so we read the
+    track name + artist from the page and download a matching YouTube result."""
+    target = url
+    if any(d in url.lower() for d in NON_DIRECT_DOMAINS):
+        q = await asyncio.to_thread(_extract_track_query, url)
+        if not q:
+            return (None, None)
+        target = "ytsearch1:" + q
+
     def _run():
         tmpdir = tempfile.mkdtemp(prefix="sc_")
         out_tmpl = os.path.join(tmpdir, "%(title).80s.%(ext)s")
         cmd = _yt_dlp_bin() + [
             "-x", "--audio-format", "mp3", "--no-playlist",
-            "--no-warnings", "-o", out_tmpl, url,
+            "--no-warnings", "-o", out_tmpl, target,
         ]
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=420)
