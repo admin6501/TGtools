@@ -29,7 +29,7 @@ install_system_packages() {
     pkg update -y || true
     pkg install -y python python-pip libwebp freetype fontconfig || true
     pkg install -y ttf-dejavu || true
-    pkg install -y curl wget || true
+    pkg install -y curl wget ffmpeg || true
     return 0
   fi
 
@@ -39,7 +39,7 @@ install_system_packages() {
     $SUDO apt-get install -y python3 python3-pip python3-venv || true
     $SUDO apt-get install -y fonts-dejavu-core webp || true
     $SUDO apt-get install -y libwebp-tools || true
-    $SUDO apt-get install -y curl wget || true
+    $SUDO apt-get install -y curl wget ffmpeg || true
     return 0
   fi
 
@@ -47,7 +47,7 @@ install_system_packages() {
     log "Detected dnf. Installing packages..."
     $SUDO dnf install -y python3 python3-pip || true
     $SUDO dnf install -y dejavu-sans-fonts libwebp-tools || true
-    $SUDO dnf install -y curl wget || true
+    $SUDO dnf install -y curl wget ffmpeg || true
     return 0
   fi
 
@@ -55,7 +55,7 @@ install_system_packages() {
     log "Detected yum. Installing packages..."
     $SUDO yum install -y python3 python3-pip || true
     $SUDO yum install -y dejavu-sans-fonts libwebp-tools || true
-    $SUDO yum install -y curl wget || true
+    $SUDO yum install -y curl wget ffmpeg || true
     return 0
   fi
 
@@ -63,7 +63,7 @@ install_system_packages() {
     log "Detected pacman. Installing packages..."
     $SUDO pacman -Sy --noconfirm python python-pip || true
     $SUDO pacman -S --noconfirm ttf-dejavu libwebp || true
-    $SUDO pacman -S --noconfirm curl wget || true
+    $SUDO pacman -S --noconfirm curl wget ffmpeg || true
     return 0
   fi
 
@@ -71,7 +71,7 @@ install_system_packages() {
     log "Detected apk. Installing packages..."
     $SUDO apk add --no-cache python3 py3-pip || true
     $SUDO apk add --no-cache ttf-dejavu libwebp-tools || true
-    $SUDO apk add --no-cache curl wget || true
+    $SUDO apk add --no-cache curl wget ffmpeg || true
     return 0
   fi
 
@@ -79,7 +79,7 @@ install_system_packages() {
     log "Detected zypper. Installing packages..."
     $SUDO zypper --non-interactive install python3 python3-pip || true
     $SUDO zypper --non-interactive install dejavu-fonts webp || true
-    $SUDO zypper --non-interactive install curl wget || true
+    $SUDO zypper --non-interactive install curl wget ffmpeg || true
     return 0
   fi
 
@@ -191,6 +191,14 @@ preflight() {
     log "emergentintegrations is already installed."
   fi
 
+  # 2c) Check yt-dlp (Universal music/video downloader for .sc and .music)
+  if ! py_pkg_installed yt_dlp && ! have yt-dlp; then
+    log "Installing yt-dlp (music downloader)..."
+    pip_install yt-dlp || warn "Could not install yt-dlp. Music download (.sc/.music) will be unavailable."
+  else
+    log "yt-dlp is already installed."
+  fi
+
   # 3) Check curl/wget (needed for font download)
   if ! have curl && ! have wget; then
     log "Neither curl nor wget found. Installing..."
@@ -224,6 +232,7 @@ import asyncio
 import time
 from datetime import datetime
 import os
+import sys
 import tempfile
 import textwrap
 import shutil
@@ -388,6 +397,9 @@ CONFIG_FILE = "bot_config.json"
 def _load_config():
     global current_provider, current_model, current_persona, custom_prompt
     global auto_reply_cooldown, default_reply, auto_reply_active, keep_alive_active
+    global online_interval, ai_in_groups, group_cooldown, default_lang
+    global current_image_model, music_active, allowed_groups, ui_lang
+    global afk_active, afk_message
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -406,6 +418,22 @@ def _load_config():
     default_reply = cfg.get("default_reply", default_reply)
     auto_reply_active = bool(cfg.get("auto_reply_active", auto_reply_active))
     keep_alive_active = bool(cfg.get("keep_alive_active", keep_alive_active))
+    try:
+        online_interval = int(cfg.get("online_interval", online_interval))
+    except Exception:
+        pass
+    ai_in_groups = bool(cfg.get("ai_in_groups", ai_in_groups))
+    try:
+        group_cooldown = int(cfg.get("group_cooldown", group_cooldown))
+    except Exception:
+        pass
+    default_lang = cfg.get("default_lang", default_lang)
+    current_image_model = cfg.get("image_model", current_image_model)
+    music_active = bool(cfg.get("music_active", music_active))
+    allowed_groups = cfg.get("allowed_groups", allowed_groups) or []
+    ui_lang = cfg.get("ui_lang", ui_lang)
+    afk_active = bool(cfg.get("afk_active", afk_active))
+    afk_message = cfg.get("afk_message", afk_message)
 
 def _save_config():
     cfg = {
@@ -417,6 +445,16 @@ def _save_config():
         "default_reply": default_reply,
         "auto_reply_active": auto_reply_active,
         "keep_alive_active": keep_alive_active,
+        "online_interval": online_interval,
+        "ai_in_groups": ai_in_groups,
+        "group_cooldown": group_cooldown,
+        "default_lang": default_lang,
+        "image_model": current_image_model,
+        "music_active": music_active,
+        "allowed_groups": allowed_groups,
+        "ui_lang": ui_lang,
+        "afk_active": afk_active,
+        "afk_message": afk_message,
     }
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -807,7 +845,7 @@ async def keep_alive():
             await client(UpdateStatusRequest(offline=False))
         except Exception:
             pass
-        await asyncio.sleep(30)
+        await asyncio.sleep(max(15, online_interval))
 
 @client.on(events.NewMessage(pattern=r"\.keepalive"))
 @admin_only
@@ -883,7 +921,7 @@ async def show_help(event):
         ".tr [\u0632\u0628\u0627\u0646] - \u062a\u0631\u062c\u0645\u0647\u200c\u06cc \u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u06cc\u0627 \u0645\u062a\u0646 (\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0641\u0627\u0631\u0633\u06cc).\n"
         ".status - \u0646\u0645\u0627\u06cc\u0634 \u0648\u0636\u0639\u06cc\u062a \u0631\u0628\u0627\u062a.\n"
     )
-    await event.reply(help_message)
+    await event.reply(FULL_MENU)
 
 @client.on(events.NewMessage(pattern=r"\.status"))
 @admin_only
@@ -1154,11 +1192,776 @@ async def set_cooldown(event):
     else:
         await event.reply(f"Cooldown \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f \u0631\u0648\u06cc {auto_reply_cooldown} \u062b\u0627\u0646\u06cc\u0647 \u0628\u0631\u0627\u06cc \u0647\u0631 \u06a9\u0627\u0631\u0628\u0631.")
 
+# ============================================================================
+# NEW FEATURES (Bidar v1.9.2) — new commands only; legacy commands unchanged.
+# ============================================================================
+
+# ---- new persistent settings (defaults; overridden by bot_config.json) ----
+online_interval = 240          # online refresh interval (seconds)
+ai_in_groups = False           # AI replies inside allowed groups
+group_cooldown = 0             # per-group cooldown (seconds), 0 = no limit
+_group_last_reply = {}
+default_lang = "en"            # default translation target language (.tl)
+current_image_model = "gemini-3.1-flash-image-preview"
+ALLOWED_IMAGE_MODELS = ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"]
+music_active = False           # auto-detect & download music links in groups
+allowed_groups = []            # chat ids allowed for AI auto-reply & music
+afk_active = False             # quick AFK static reply
+afk_message = ""
+ui_lang = "fa"                 # UI language for new commands: "fa" or "en"
+_sc_last_results = []          # last SoundCloud search results: [(title, url)]
+
+
+def UL(fa, en):
+    """Return text in the configured UI language."""
+    return en if ui_lang == "en" else fa
+
+
+FULL_MENU = (
+    "\U0001f916 Bidar \u2014 Full Command Guide\n"
+    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+    "\U0001f4e1 Online Status\n"
+    "  .keepalive | .stopalive \u2014 always online (legacy)\n"
+    "  .interval <s> \u2014 refresh interval (default 240s)\n\n"
+    "\U0001f916 Auto-reply\n"
+    "  .startpish | .stoppish \u2014 toggle auto-reply (legacy)\n"
+    "  .edit <text> \u2014 edit reply message (legacy)\n"
+    "  .afk [text] \u2014 quick AFK shortcut (.afk off to disable)\n\n"
+    "\U0001f9e0 AI Assistant\n"
+    "  .model <provider> <model> \u2014 change AI model (legacy)\n"
+    "  .persona <key> | .setprompt <text> \u2014 personality (legacy)\n"
+    "  .aigroups on|off \u2014 AI in groups\n"
+    "  .groupcd <s> \u2014 group cooldown (0=no limit)\n"
+    "  .cooldown <s> \u2014 per-user cooldown (legacy)\n"
+    "  .aireset \u2014 clear AI conversation memory\n"
+    "  .r [hint] \u2014 manually generate AI reply for current chat\n\n"
+    "\U0001f310 Translation\n"
+    "  .lang <code> \u2014 set default target language\n"
+    "  .tl <text> | reply + .tl \u2014 translate to default language\n"
+    "  .tr [lang] \u2014 translate replied/text (legacy)\n"
+    "  .to <code> <text> \u2014 edit message to that language\n\n"
+    "\U0001f3a8 Image\n"
+    "  .img <description> \u2014 generate image (Nano Banana)\n"
+    "  .imgedit <change> \u2014 edit image (reply to image)\n"
+    "  .ocr \u2014 extract text from image (legacy)\n"
+    "  .imgmodel <model> \u2014 change image model\n"
+    "  .st \u2014 text \u2192 premium sticker (reply, legacy)\n\n"
+    "\U0001f50e Search\n"
+    "  .search <query> \u2014 search normal chats \u2192 .txt file\n"
+    "  .searchall <query> \u2014 search channels\n\n"
+    "\U0001f3b5 Music (Universal Downloader)\n"
+    "  .sc <link> \u2014 download from a music link\n"
+    "  .sc <name> \u2014 search SoundCloud (top 5) \u2192 pick with .sc <num>\n"
+    "  .music on|off \u2014 auto-detect music links in allowed groups\n"
+    "  .allow help \u2014 manage allowed groups\n\n"
+    "\U0001f4ca Info\n"
+    "  .alive \u2014 health check\n"
+    "  .ping \u2014 latency test\n"
+    "  .stats \u2014 full stats & settings\n"
+    "  .status \u2014 basic status (legacy)\n"
+    "  .id \u2014 chat / user ID\n\n"
+    "\U0001f527 Admin\n"
+    "  .botlang <en|fa> \u2014 change UI language\n"
+    "  .restart \u2014 restart\n"
+    "  .help | .menu | .commands \u2014 this help\n"
+    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    "\U0001f512 Owner-only.  \U0001f516 v1.9.2"
+)
+
+
+# ---- image generation / editing (Nano Banana via Emergent) ----
+async def _gen_image(prompt, image_b64=None):
+    """Generate (or edit, if image_b64 given) an image. Returns PNG bytes or None."""
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        return None
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"img_{int(time.time() * 1000)}",
+            system_message="You are a helpful image generation assistant.",
+        ).with_model("gemini", current_image_model).with_params(modalities=["image", "text"])
+        if image_b64:
+            msg = UserMessage(text=prompt, file_contents=[ImageContent(image_base64=image_b64)])
+        else:
+            msg = UserMessage(text=prompt)
+        _text, images = await chat.send_message_multimodal_response(msg)
+        if images:
+            return base64.b64decode(images[0]["data"])
+        return None
+    except Exception as e:
+        print(f"Image gen error: {e}")
+        return None
+
+
+# ---- music downloader (yt-dlp) ----
+MUSIC_DOMAINS = (
+    "soundcloud.com", "youtube.com", "youtu.be", "spotify.com",
+    "deezer.com", "music.apple.com", "tidal.com", "bandcamp.com",
+)
+
+
+def _has_music_link(text):
+    t = (text or "").lower()
+    return any(d in t for d in MUSIC_DOMAINS)
+
+
+def _yt_dlp_bin():
+    if shutil.which("yt-dlp"):
+        return ["yt-dlp"]
+    return [sys.executable, "-m", "yt_dlp"]
+
+
+async def _music_search(query, limit=5):
+    """Search SoundCloud; return list of (title, url)."""
+    def _run():
+        cmd = _yt_dlp_bin() + [
+            "--flat-playlist", "--no-warnings",
+            "--print", "%(title)s|::|%(webpage_url)s",
+            f"scsearch{limit}:{query}",
+        ]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception:
+            return []
+        res = []
+        for line in (out.stdout or "").splitlines():
+            if "|::|" in line:
+                title, url = line.split("|::|", 1)
+                if title.strip() and url.strip():
+                    res.append((title.strip(), url.strip()))
+        return res
+    return await asyncio.to_thread(_run)
+
+
+async def _music_download(url):
+    """Download audio as mp3; return (filepath, title) or (None, None)."""
+    def _run():
+        tmpdir = tempfile.mkdtemp(prefix="sc_")
+        out_tmpl = os.path.join(tmpdir, "%(title).80s.%(ext)s")
+        cmd = _yt_dlp_bin() + [
+            "-x", "--audio-format", "mp3", "--no-playlist",
+            "--no-warnings", "-o", out_tmpl, url,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=420)
+        except Exception:
+            return (None, None)
+        try:
+            files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
+        except Exception:
+            return (None, None)
+        files = [f for f in files if os.path.isfile(f)]
+        if not files:
+            return (None, None)
+        path = max(files, key=os.path.getsize)
+        title = os.path.splitext(os.path.basename(path))[0]
+        return (path, title)
+    return await asyncio.to_thread(_run)
+
+
+# ---- chat search (Telethon) ----
+async def _search_messages(query, channels_only=False, limit=300):
+    """Search the user's dialogs for `query`. Returns a list of formatted lines."""
+    results = []
+    async for dialog in client.iter_dialogs():
+        ent = dialog.entity
+        is_broadcast = bool(getattr(ent, "broadcast", False))
+        if channels_only:
+            if not is_broadcast:
+                continue
+        else:
+            if is_broadcast:
+                continue
+        try:
+            async for msg in client.iter_messages(dialog.id, search=query, limit=30):
+                if not (msg.raw_text or "").strip():
+                    continue
+                when = msg.date.strftime("%Y-%m-%d %H:%M") if msg.date else ""
+                results.append(f"[{dialog.name}] ({when})\n{msg.raw_text}\n{'-' * 40}")
+                if len(results) >= limit:
+                    return results
+        except Exception:
+            continue
+    return results
+
+
+# ---- NEW command handlers ----
+@client.on(events.NewMessage(pattern=r"^\.interval(?:\s+(?P<sec>\d+))?\s*$"))
+@admin_only
+async def set_interval(event):
+    global online_interval
+    sec = event.pattern_match.group("sec")
+    if sec is None:
+        await event.reply(UL(
+            f"\u0641\u0627\u0635\u0644\u0647\u200c\u06cc \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646: {online_interval} \u062b\u0627\u0646\u06cc\u0647\n\u062a\u063a\u06cc\u06cc\u0631: `.interval <\u062b\u0627\u0646\u06cc\u0647>`",
+            f"Online refresh interval: {online_interval}s\nChange: `.interval <s>`"))
+        return
+    online_interval = max(15, int(sec))
+    _save_config()
+    await event.reply(UL(f"\u0641\u0627\u0635\u0644\u0647\u200c\u06cc \u0622\u0646\u0644\u0627\u06cc\u0646 \u0631\u0648\u06cc {online_interval} \u062b\u0627\u0646\u06cc\u0647 \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.",
+                         f"Online interval set to {online_interval}s."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.afk(?:\s+(?P<txt>[\s\S]+))?$"))
+@admin_only
+async def afk_cmd(event):
+    global afk_active, afk_message
+    txt = (event.pattern_match.group("txt") or "").strip()
+    if txt.lower() == "off":
+        afk_active = False
+        _save_config()
+        await event.reply(UL("\u062d\u0627\u0644\u062a AFK \u062e\u0627\u0645\u0648\u0634 \u0634\u062f.", "AFK disabled."))
+        return
+    afk_active = True
+    afk_message = txt or UL("\u0627\u0644\u0627\u0646 \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a\u0645\u060c \u0628\u0639\u062f\u0627\u064b \u067e\u0627\u0633\u062e \u0645\u06cc\u200c\u062f\u0647\u0645.",
+                            "I'm AFK right now, I'll reply later.")
+    _save_config()
+    await event.reply(UL(f"\u062d\u0627\u0644\u062a AFK \u0631\u0648\u0634\u0646 \u0634\u062f. \u067e\u06cc\u0627\u0645: {afk_message}\n(\u0628\u0631\u0627\u06cc \u062e\u0627\u0645\u0648\u0634 \u06a9\u0631\u062f\u0646: .afk off)",
+                         f"AFK enabled. Message: {afk_message}\n(disable with: .afk off)"))
+
+
+@client.on(events.NewMessage(pattern=r"^\.aigroups(?:\s+(?P<v>on|off))?\s*$"))
+@admin_only
+async def set_aigroups(event):
+    global ai_in_groups
+    v = event.pattern_match.group("v")
+    if not v:
+        on_fa = "\u0631\u0648\u0634\u0646" if ai_in_groups else "\u062e\u0627\u0645\u0648\u0634"
+        on_en = "ON" if ai_in_groups else "OFF"
+        await event.reply(UL(
+            f"AI \u062f\u0631 \u06af\u0631\u0648\u0647\u200c\u0647\u0627: {on_fa}\n\u0627\u0633\u062a\u0641\u0627\u062f\u0647: `.aigroups on|off`",
+            f"AI in groups: {on_en}\nUsage: `.aigroups on|off`"))
+        return
+    ai_in_groups = (v == "on")
+    _save_config()
+    on_fa = "\u0631\u0648\u0634\u0646" if ai_in_groups else "\u062e\u0627\u0645\u0648\u0634"
+    on_en = "ON" if ai_in_groups else "OFF"
+    await event.reply(UL(f"AI \u062f\u0631 \u06af\u0631\u0648\u0647\u200c\u0647\u0627 {on_fa} \u0634\u062f.",
+                         f"AI in groups turned {on_en}."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.groupcd(?:\s+(?P<sec>\d+))?\s*$"))
+@admin_only
+async def set_groupcd(event):
+    global group_cooldown
+    sec = event.pattern_match.group("sec")
+    if sec is None:
+        await event.reply(UL(
+            f"\u06a9\u0648\u0644\u200c\u062f\u0627\u0648\u0646 \u06af\u0631\u0648\u0647: {group_cooldown} \u062b\u0627\u0646\u06cc\u0647 (\u06f0 = \u0628\u062f\u0648\u0646 \u0645\u062d\u062f\u0648\u062f\u06cc\u062a)\n\u062a\u063a\u06cc\u06cc\u0631: `.groupcd <\u062b\u0627\u0646\u06cc\u0647>`",
+            f"Group cooldown: {group_cooldown}s (0=no limit)\nChange: `.groupcd <s>`"))
+        return
+    group_cooldown = int(sec)
+    _save_config()
+    await event.reply(UL(f"\u06a9\u0648\u0644\u200c\u062f\u0627\u0648\u0646 \u06af\u0631\u0648\u0647 \u0631\u0648\u06cc {group_cooldown} \u062b\u0627\u0646\u06cc\u0647 \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.",
+                         f"Group cooldown set to {group_cooldown}s."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.aireset\s*$"))
+@admin_only
+async def aireset_cmd(event):
+    _reset_ai_sessions()
+    await event.reply(UL("\u062d\u0627\u0641\u0638\u0647\u200c\u06cc \u0645\u06a9\u0627\u0644\u0645\u0627\u062a \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u067e\u0627\u06a9 \u0634\u062f.",
+                         "AI conversation memory cleared."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.r(?:\s+(?P<hint>[\s\S]+))?$"))
+@admin_only
+async def manual_ai_reply(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply(UL("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a.", "AI is not available."))
+        return
+    hint = (event.pattern_match.group("hint") or "").strip()
+    target = None
+    src_text = ""
+    if event.is_reply:
+        rep = await event.get_reply_message()
+        if rep:
+            target = rep
+            src_text = (rep.raw_text or "").strip()
+    if not src_text:
+        async for m in client.iter_messages(event.chat_id, limit=10):
+            if m.id == event.id:
+                continue
+            if (m.raw_text or "").strip():
+                target = m
+                src_text = m.raw_text.strip()
+                break
+    prompt = src_text
+    if hint:
+        prompt = (f"{src_text}\n\n[\u0631\u0627\u0647\u0646\u0645\u0627\u06cc \u067e\u0627\u0633\u062e: {hint}]" if src_text else hint)
+    if not prompt:
+        await event.reply(UL("\u0645\u062a\u0646\u06cc \u0628\u0631\u0627\u06cc \u067e\u0627\u0633\u062e \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.", "No text found to reply to."))
+        return
+    reply_text = await _ai_generate(f"manual_{event.chat_id}", prompt)
+    if not reply_text:
+        await event.reply(UL("\u062a\u0648\u0644\u06cc\u062f \u067e\u0627\u0633\u062e \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Failed to generate a reply."))
+        return
+    try:
+        if target is not None:
+            await target.reply(reply_text)
+            await event.delete()
+        else:
+            await event.edit(reply_text)
+    except Exception:
+        await event.reply(reply_text)
+
+
+@client.on(events.NewMessage(pattern=r"^\.lang(?:\s+(?P<code>\S+))?\s*$"))
+@admin_only
+async def set_lang(event):
+    global default_lang
+    code = event.pattern_match.group("code")
+    if not code:
+        await event.reply(UL(
+            f"\u0632\u0628\u0627\u0646 \u0645\u0642\u0635\u062f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636: `{default_lang}`\n\u062a\u063a\u06cc\u06cc\u0631: `.lang <code>` \u0645\u062b\u0644 `.lang fa`",
+            f"Default target language: `{default_lang}`\nChange: `.lang <code>` e.g. `.lang fa`"))
+        return
+    default_lang = code.strip()
+    _save_config()
+    await event.reply(UL(f"\u0632\u0628\u0627\u0646 \u0645\u0642\u0635\u062f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0631\u0648\u06cc `{default_lang}` \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.",
+                         f"Default target language set to `{default_lang}`."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.tl(?:\s+(?P<txt>[\s\S]+))?$"))
+@admin_only
+async def tl_cmd(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply(UL("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a.", "AI is not available."))
+        return
+    txt = (event.pattern_match.group("txt") or "").strip()
+    reply = await event.get_reply_message() if event.is_reply else None
+    src = (reply.raw_text or "").strip() if reply else txt
+    if not src:
+        await event.reply(UL("\u0631\u0648\u06cc \u067e\u06cc\u0627\u0645\u06cc \u0631\u06cc\u067e\u0644\u0627\u06cc \u06a9\u0646 \u06cc\u0627 `.tl <\u0645\u062a\u0646>` \u0628\u0641\u0631\u0633\u062a.",
+                             "Reply to a message or use `.tl <text>`."))
+        return
+    out = await _translate(src, default_lang)
+    if not out:
+        await event.reply(UL("\u062a\u0631\u062c\u0645\u0647 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Translation failed."))
+        return
+    if reply is not None:
+        try:
+            await reply.reply(out)
+        except Exception:
+            await event.reply(out)
+    else:
+        try:
+            if event.out:
+                await event.edit(out)
+            else:
+                await event.reply(out)
+        except Exception:
+            await event.reply(out)
+
+
+@client.on(events.NewMessage(pattern=r"^\.to\s+(?P<code>\S+)\s+(?P<txt>[\s\S]+)$"))
+@admin_only
+async def to_cmd(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply(UL("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a.", "AI is not available."))
+        return
+    code = event.pattern_match.group("code").strip()
+    txt = event.pattern_match.group("txt").strip()
+    out = await _translate(txt, code)
+    if not out:
+        await event.reply(UL("\u062a\u0631\u062c\u0645\u0647 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Translation failed."))
+        return
+    try:
+        if event.out:
+            await event.edit(out)
+        else:
+            await event.reply(out)
+    except Exception:
+        await event.reply(out)
+
+
+@client.on(events.NewMessage(pattern=r"^\.img\s+(?P<desc>[\s\S]+)$"))
+@admin_only
+async def img_cmd(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply(UL("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a.", "AI is not available."))
+        return
+    desc = event.pattern_match.group("desc").strip()
+    note = await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u0633\u0627\u062e\u062a \u062a\u0635\u0648\u06cc\u0631...", "Generating image..."))
+    data = await _gen_image(desc)
+    if not data:
+        await note.edit(UL("\u0633\u0627\u062e\u062a \u062a\u0635\u0648\u06cc\u0631 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Image generation failed."))
+        return
+    tmp = os.path.join(tempfile.gettempdir(), f"img_{event.id}.png")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    try:
+        await client.send_file(event.chat_id, tmp, reply_to=event.id)
+        await note.delete()
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+@client.on(events.NewMessage(pattern=r"^\.imgedit\s+(?P<change>[\s\S]+)$"))
+@admin_only
+async def imgedit_cmd(event):
+    if not _AI_AVAILABLE or not EMERGENT_LLM_KEY:
+        await event.reply(UL("\u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u062f\u0631 \u062f\u0633\u062a\u0631\u0633 \u0646\u06cc\u0633\u062a.", "AI is not available."))
+        return
+    if not event.is_reply:
+        await event.reply(UL("\u0631\u0648\u06cc \u06cc\u06a9 \u0639\u06a9\u0633 \u0631\u06cc\u067e\u0644\u0627\u06cc \u06a9\u0646 \u0648 \u0628\u0639\u062f `.imgedit <\u062a\u063a\u06cc\u06cc\u0631>` \u0628\u0641\u0631\u0633\u062a.",
+                             "Reply to an image, then `.imgedit <change>`."))
+        return
+    reply = await event.get_reply_message()
+    has_image = bool(reply and (reply.photo or (reply.document and (getattr(reply.document, "mime_type", "") or "").startswith("image/"))))
+    if not has_image:
+        await event.reply(UL("\u067e\u06cc\u0627\u0645 \u0631\u06cc\u067e\u0644\u0627\u06cc\u200c\u0634\u062f\u0647 \u0639\u06a9\u0633 \u0646\u062f\u0627\u0631\u062f.", "Replied message has no image."))
+        return
+    change = event.pattern_match.group("change").strip()
+    data = await reply.download_media(file=bytes)
+    if not data:
+        await event.reply(UL("\u062f\u0627\u0646\u0644\u0648\u062f \u0639\u06a9\u0633 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Failed to download image."))
+        return
+    image_b64 = base64.b64encode(data).decode("utf-8")
+    note = await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u0648\u06cc\u0631\u0627\u06cc\u0634 \u062a\u0635\u0648\u06cc\u0631...", "Editing image..."))
+    out = await _gen_image(change, image_b64=image_b64)
+    if not out:
+        await note.edit(UL("\u0648\u06cc\u0631\u0627\u06cc\u0634 \u062a\u0635\u0648\u06cc\u0631 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Image edit failed."))
+        return
+    tmp = os.path.join(tempfile.gettempdir(), f"imge_{event.id}.png")
+    with open(tmp, "wb") as f:
+        f.write(out)
+    try:
+        await client.send_file(event.chat_id, tmp, reply_to=reply.id)
+        await note.delete()
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+@client.on(events.NewMessage(pattern=r"^\.imgmodel(?:\s+(?P<m>\S+))?\s*$"))
+@admin_only
+async def set_imgmodel(event):
+    global current_image_model
+    m = event.pattern_match.group("m")
+    if not m:
+        lines = [UL(f"\u0645\u062f\u0644 \u062a\u0635\u0648\u06cc\u0631 \u0641\u0639\u0644\u06cc: `{current_image_model}`", f"Current image model: `{current_image_model}`"),
+                 UL("\u0645\u062f\u0644\u200c\u0647\u0627\u06cc \u0645\u0648\u062c\u0648\u062f:", "Available models:")]
+        for x in ALLOWED_IMAGE_MODELS:
+            lines.append(f"\u2022 `{x}`")
+        await event.reply("\n".join(lines))
+        return
+    if m not in ALLOWED_IMAGE_MODELS:
+        await event.reply(UL("\u0645\u062f\u0644 \u0646\u0627\u0645\u0639\u062a\u0628\u0631. \u0645\u062c\u0627\u0632: ", "Invalid model. Allowed: ") + ", ".join(ALLOWED_IMAGE_MODELS))
+        return
+    current_image_model = m
+    _save_config()
+    await event.reply(UL(f"\u0645\u062f\u0644 \u062a\u0635\u0648\u06cc\u0631 \u0631\u0648\u06cc `{m}` \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.", f"Image model set to `{m}`."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.search\s+(?P<q>[\s\S]+)$"))
+@admin_only
+async def search_cmd(event):
+    q = event.pattern_match.group("q").strip()
+    note = await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u062c\u0633\u062a\u062c\u0648...", "Searching..."))
+    results = await _search_messages(q, channels_only=False)
+    if not results:
+        await note.edit(UL("\u0646\u062a\u06cc\u062c\u0647\u200c\u0627\u06cc \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.", "No results found."))
+        return
+    body = f"Search results for: {q}\n{'=' * 40}\n\n" + "\n".join(results)
+    tmp = os.path.join(tempfile.gettempdir(), f"search_{event.id}.txt")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(body)
+    try:
+        await client.send_file("me", tmp, caption=UL(f"\u0646\u062a\u0627\u06cc\u062c \u062c\u0633\u062a\u062c\u0648 \u0628\u0631\u0627\u06cc: {q} ({len(results)} \u0645\u0648\u0631\u062f)",
+                                                      f"Search results for: {q} ({len(results)} hits)"))
+        await note.edit(UL(f"\u2705 {len(results)} \u0646\u062a\u06cc\u062c\u0647 \u062f\u0631 Saved Messages \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",
+                           f"\u2705 {len(results)} results saved to Saved Messages."))
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+@client.on(events.NewMessage(pattern=r"^\.searchall\s+(?P<q>[\s\S]+)$"))
+@admin_only
+async def searchall_cmd(event):
+    q = event.pattern_match.group("q").strip()
+    note = await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u062c\u0633\u062a\u062c\u0648 \u062f\u0631 \u06a9\u0627\u0646\u0627\u0644\u200c\u0647\u0627...", "Searching channels..."))
+    results = await _search_messages(q, channels_only=True)
+    if not results:
+        await note.edit(UL("\u0646\u062a\u06cc\u062c\u0647\u200c\u0627\u06cc \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.", "No results found."))
+        return
+    body = f"Channel search results for: {q}\n{'=' * 40}\n\n" + "\n".join(results)
+    tmp = os.path.join(tempfile.gettempdir(), f"searchall_{event.id}.txt")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(body)
+    try:
+        await client.send_file("me", tmp, caption=UL(f"\u0646\u062a\u0627\u06cc\u062c \u06a9\u0627\u0646\u0627\u0644\u200c\u0647\u0627 \u0628\u0631\u0627\u06cc: {q} ({len(results)} \u0645\u0648\u0631\u062f)",
+                                                      f"Channel results for: {q} ({len(results)} hits)"))
+        await note.edit(UL(f"\u2705 {len(results)} \u0646\u062a\u06cc\u062c\u0647 \u062f\u0631 Saved Messages \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",
+                           f"\u2705 {len(results)} results saved to Saved Messages."))
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+@client.on(events.NewMessage(pattern=r"^\.sc(?:\s+(?P<arg>[\s\S]+))?$"))
+@admin_only
+async def sc_cmd(event):
+    global _sc_last_results
+    arg = (event.pattern_match.group("arg") or "").strip()
+    if not arg:
+        await event.reply(UL("\u0627\u0633\u062a\u0641\u0627\u062f\u0647: `.sc <\u0644\u06cc\u0646\u06a9>` \u06cc\u0627 `.sc <\u0646\u0627\u0645>` \u0628\u0631\u0627\u06cc \u062c\u0633\u062a\u062c\u0648.",
+                             "Usage: `.sc <link>` or `.sc <name>` to search."))
+        return
+
+    async def _download_and_send(url, label=None):
+        note = await event.reply(UL(f"\u062f\u0631 \u062d\u0627\u0644 \u062f\u0627\u0646\u0644\u0648\u062f{(': ' + label) if label else '...'}",
+                                    f"Downloading{(': ' + label) if label else '...'}"))
+        path, _t = await _music_download(url)
+        if not path:
+            await note.edit(UL("\u062f\u0627\u0646\u0644\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f.", "Download failed."))
+            return
+        try:
+            await client.send_file(event.chat_id, path, reply_to=event.id)
+            await note.delete()
+        finally:
+            try:
+                os.remove(path)
+                shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+            except Exception:
+                pass
+
+    if arg.isdigit() and _sc_last_results:
+        idx = int(arg) - 1
+        if idx < 0 or idx >= len(_sc_last_results):
+            await event.reply(UL("\u0634\u0645\u0627\u0631\u0647 \u0646\u0627\u0645\u0639\u062a\u0628\u0631.", "Invalid number."))
+            return
+        title, url = _sc_last_results[idx]
+        await _download_and_send(url, label=title)
+        return
+
+    if arg.lower().startswith("http"):
+        await _download_and_send(arg)
+        return
+
+    note = await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u062c\u0633\u062a\u062c\u0648 \u062f\u0631 SoundCloud...", "Searching SoundCloud..."))
+    res = await _music_search(arg, limit=5)
+    if not res:
+        await note.edit(UL("\u0646\u062a\u06cc\u062c\u0647\u200c\u0627\u06cc \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.", "No results found."))
+        return
+    _sc_last_results = res
+    lines = [UL("\u0646\u062a\u0627\u06cc\u062c (\u0628\u0627 `.sc <\u0634\u0645\u0627\u0631\u0647>` \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646):", "Results (pick with `.sc <num>`):")]
+    for i, (title, _u) in enumerate(res, 1):
+        lines.append(f"{i}. {title}")
+    await note.edit("\n".join(lines))
+
+
+@client.on(events.NewMessage(pattern=r"^\.music(?:\s+(?P<v>on|off))?\s*$"))
+@admin_only
+async def set_music(event):
+    global music_active
+    v = event.pattern_match.group("v")
+    if not v:
+        on_fa = "\u0631\u0648\u0634\u0646" if music_active else "\u062e\u0627\u0645\u0648\u0634"
+        on_en = "ON" if music_active else "OFF"
+        await event.reply(UL(
+            f"\u062a\u0634\u062e\u06cc\u0635 \u062e\u0648\u062f\u06a9\u0627\u0631 \u0645\u0648\u0632\u06cc\u06a9: {on_fa}\n\u0627\u0633\u062a\u0641\u0627\u062f\u0647: `.music on|off`",
+            f"Music auto-detect: {on_en}\nUsage: `.music on|off`"))
+        return
+    music_active = (v == "on")
+    _save_config()
+    on_fa = "\u0631\u0648\u0634\u0646" if music_active else "\u062e\u0627\u0645\u0648\u0634"
+    on_en = "ON" if music_active else "OFF"
+    await event.reply(UL(f"\u062a\u0634\u062e\u06cc\u0635 \u062e\u0648\u062f\u06a9\u0627\u0631 \u0645\u0648\u0632\u06cc\u06a9 {on_fa} \u0634\u062f.",
+                         f"Music auto-detect turned {on_en}."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.allow(?:\s+(?P<sub>\S+))?\s*$"))
+@admin_only
+async def allow_cmd(event):
+    global allowed_groups
+    sub = (event.pattern_match.group("sub") or "help").lower()
+    if sub == "add":
+        if event.chat_id not in allowed_groups:
+            allowed_groups.append(event.chat_id)
+            _save_config()
+        await event.reply(UL("\u0627\u06cc\u0646 \u0686\u062a \u0628\u0647 \u0644\u06cc\u0633\u062a \u0645\u062c\u0627\u0632 \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.", "This chat was added to the allow list."))
+    elif sub in ("del", "remove", "rm"):
+        if event.chat_id in allowed_groups:
+            allowed_groups.remove(event.chat_id)
+            _save_config()
+        await event.reply(UL("\u0627\u06cc\u0646 \u0686\u062a \u0627\u0632 \u0644\u06cc\u0633\u062a \u0645\u062c\u0627\u0632 \u062d\u0630\u0641 \u0634\u062f.", "This chat was removed from the allow list."))
+    elif sub == "list":
+        if not allowed_groups:
+            await event.reply(UL("\u0644\u06cc\u0633\u062a \u0645\u062c\u0627\u0632 \u062e\u0627\u0644\u06cc \u0627\u0633\u062a.", "Allow list is empty."))
+        else:
+            await event.reply(UL("\u0686\u062a\u200c\u0647\u0627\u06cc \u0645\u062c\u0627\u0632:\n", "Allowed chats:\n") + "\n".join(f"\u2022 `{c}`" for c in allowed_groups))
+    else:
+        await event.reply(UL(
+            "\u0645\u062f\u06cc\u0631\u06cc\u062a \u06af\u0631\u0648\u0647\u200c\u0647\u0627\u06cc \u0645\u062c\u0627\u0632 \u0628\u0631\u0627\u06cc AI \u0648 \u062a\u0634\u062e\u06cc\u0635 \u0645\u0648\u0632\u06cc\u06a9:\n"
+            "`.allow add` \u2014 \u0627\u0641\u0632\u0648\u062f\u0646 \u0686\u062a \u0641\u0639\u0644\u06cc\n"
+            "`.allow del` \u2014 \u062d\u0630\u0641 \u0686\u062a \u0641\u0639\u0644\u06cc\n"
+            "`.allow list` \u2014 \u0646\u0645\u0627\u06cc\u0634 \u0644\u06cc\u0633\u062a",
+            "Manage groups allowed for AI & music auto-detect:\n"
+            "`.allow add` \u2014 add current chat\n"
+            "`.allow del` \u2014 remove current chat\n"
+            "`.allow list` \u2014 show the list"))
+
+
+@client.on(events.NewMessage(pattern=r"^\.alive\s*$"))
+@admin_only
+async def alive_cmd(event):
+    await event.reply(UL("\U0001f916 \u0628\u06cc\u062f\u0627\u0631 \u0641\u0639\u0651\u0627\u0644 \u0627\u0633\u062a. \u2705", "\U0001f916 Bidar is alive. \u2705"))
+
+
+@client.on(events.NewMessage(pattern=r"^\.ping\s*$"))
+@admin_only
+async def ping_cmd(event):
+    start = time.time()
+    msg = await event.reply("\U0001f3d3 ...")
+    ms = (time.time() - start) * 1000
+    await msg.edit(UL(f"\U0001f3d3 \u067e\u0627\u0646\u06af! `{ms:.0f}ms`", f"\U0001f3d3 Pong! `{ms:.0f}ms`"))
+
+
+@client.on(events.NewMessage(pattern=r"^\.stats\s*$"))
+@admin_only
+async def stats_cmd(event):
+    msg = (
+        "\U0001f4ca **Bidar \u2014 Stats & Settings**\n"
+        f"\u2022 Online keepalive: {'ON' if keep_alive_active else 'OFF'} (interval {online_interval}s)\n"
+        f"\u2022 Auto-reply: {'ON' if auto_reply_active else 'OFF'}\n"
+        f"\u2022 AFK: {'ON' if afk_active else 'OFF'}\n"
+        f"\u2022 AI in groups: {'ON' if ai_in_groups else 'OFF'}\n"
+        f"\u2022 Music auto-detect: {'ON' if music_active else 'OFF'}\n"
+        f"\u2022 AI model: {current_provider} / {current_model}\n"
+        f"\u2022 Image model: {current_image_model}\n"
+        f"\u2022 Persona: {current_persona}\n"
+        f"\u2022 Default lang: {default_lang}\n"
+        f"\u2022 User cooldown: {auto_reply_cooldown}s | Group cooldown: {group_cooldown}s\n"
+        f"\u2022 Allowed chats: {len(allowed_groups)}\n"
+        f"\u2022 AI available: {'Yes' if (_AI_AVAILABLE and EMERGENT_LLM_KEY) else 'No'}\n"
+        f"\u2022 Auto-reply count: {auto_reply_count}\n"
+        f"\u2022 Last auto-reply: {last_auto_reply_time if last_auto_reply_time else '-'}\n"
+        f"\u2022 UI language: {ui_lang}\n"
+        "\U0001f516 v1.9.2"
+    )
+    await event.reply(msg)
+
+
+@client.on(events.NewMessage(pattern=r"^\.id\s*$"))
+@admin_only
+async def id_cmd(event):
+    lines = [f"\U0001f4ac Chat ID: `{event.chat_id}`", f"\U0001f64b Your ID: `{event.sender_id}`"]
+    if event.is_reply:
+        rep = await event.get_reply_message()
+        if rep and rep.sender_id:
+            lines.append(f"\u21a9\ufe0f Replied user ID: `{rep.sender_id}`")
+    await event.reply("\n".join(lines))
+
+
+@client.on(events.NewMessage(pattern=r"^\.botlang(?:\s+(?P<l>en|fa))?\s*$"))
+@admin_only
+async def botlang_cmd(event):
+    global ui_lang
+    l = event.pattern_match.group("l")
+    if not l:
+        await event.reply(UL(f"\u0632\u0628\u0627\u0646 \u0631\u0627\u0628\u0637 \u0641\u0639\u0644\u06cc: `{ui_lang}`\n\u062a\u063a\u06cc\u06cc\u0631: `.botlang en|fa`",
+                             f"Current UI language: `{ui_lang}`\nChange: `.botlang en|fa`"))
+        return
+    ui_lang = l
+    _save_config()
+    await event.reply(UL("\u0632\u0628\u0627\u0646 \u0631\u0627\u0628\u0637 \u062a\u0646\u0638\u06cc\u0645 \u0634\u062f.", "UI language updated."))
+
+
+@client.on(events.NewMessage(pattern=r"^\.(?:menu|commands)\s*$"))
+@admin_only
+async def menu_cmd(event):
+    await event.reply(FULL_MENU)
+
+
+@client.on(events.NewMessage(pattern=r"^\.restart\s*$"))
+@admin_only
+async def restart_cmd(event):
+    await event.reply(UL("\u062f\u0631 \u062d\u0627\u0644 \u0631\u06cc\u200c\u0627\u0633\u062a\u0627\u0631\u062a...", "Restarting..."))
+    try:
+        if shutil.which("systemctl"):
+            subprocess.Popen(["systemctl", "restart", "tg-userbot"])
+            return
+    except Exception:
+        pass
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+# Group handler: AI replies in allowed groups + music link auto-detect.
+# Runs before auto_reply; only acts on non-private incoming messages.
+@client.on(events.NewMessage(incoming=True))
+async def group_handler(event):
+    if event.is_private:
+        return
+    if event.chat_id not in allowed_groups:
+        return
+    text = (event.raw_text or "").strip()
+    if text.startswith("."):
+        return
+    sender = await event.get_sender()
+    if is_bot(sender) or is_admin(event.sender_id):
+        return
+
+    # Music auto-detect & download
+    if music_active and _has_music_link(text):
+        m = re.search(r"https?://\S+", text)
+        if m:
+            path, _t = await _music_download(m.group(0))
+            if path:
+                try:
+                    await client.send_file(event.chat_id, path, reply_to=event.id)
+                finally:
+                    try:
+                        os.remove(path)
+                        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+                    except Exception:
+                        pass
+            return
+
+    # AI in groups: only when replying to me or mentioning me
+    if ai_in_groups and _AI_AVAILABLE and EMERGENT_LLM_KEY and text:
+        me = await client.get_me()
+        triggered = False
+        if event.is_reply:
+            rep = await event.get_reply_message()
+            if rep and rep.sender_id == me.id:
+                triggered = True
+        if not triggered and me.username and ("@" + me.username.lower()) in text.lower():
+            triggered = True
+        if not triggered:
+            return
+        if group_cooldown > 0:
+            now = time.time()
+            last = _group_last_reply.get(event.chat_id, 0)
+            if now - last < group_cooldown:
+                return
+            _group_last_reply[event.chat_id] = now
+        reply_text = await _ai_generate(f"grp_{event.chat_id}_{event.sender_id}", text)
+        if reply_text:
+            await event.reply(reply_text)
+
+
 # BUG FIX: auto_reply MUST be the LAST handler so it doesn't intercept admin commands
 @client.on(events.NewMessage(incoming=True))
 async def auto_reply(event):
     global auto_reply_active, auto_reply_count, last_auto_reply_time
-    if not auto_reply_active or not event.is_private:
+    if not event.is_private:
+        return
+    if not (auto_reply_active or afk_active):
         return
     # Never auto-reply to command messages
     if (event.raw_text or "").strip().startswith("."):
@@ -1168,6 +1971,14 @@ async def auto_reply(event):
         return
     # Do not let the AI reply to admins' own messages
     if is_admin(event.sender_id):
+        return
+    # Quick AFK static reply takes precedence (no AI)
+    if afk_active:
+        await event.reply(afk_message or default_reply)
+        auto_reply_count += 1
+        last_auto_reply_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return
+    if not auto_reply_active:
         return
     # Per-user cooldown to avoid spamming replies / AI usage
     if auto_reply_cooldown > 0:
