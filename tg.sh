@@ -616,11 +616,11 @@ async def _add_sticker_to_admin_pack(admin_id: int, doc, emoji: str = "\U0001f4d
 def is_admin(user_id):
     return str(user_id) in admin_users
 
-# Removes the repeated authorization boilerplate from every command handler.
+# Restricts every command to admins/owner. Non-admins are SILENTLY ignored
+# (no reply) so commands are truly owner-only and can't be triggered/abused by others.
 def admin_only(handler):
     async def wrapper(event):
         if not is_admin(event.sender_id):
-            await event.reply("You are not authorized to use this command.")
             return
         return await handler(event)
     return wrapper
