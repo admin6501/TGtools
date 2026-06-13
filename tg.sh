@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PYTHON_FILE="tools.py"
+SERVICE_NAME="tg-userbot"
 
 # --- Vazirmatn font ---
 VZ_FONT_FILE="Vazirmatn-Regular.ttf"
@@ -211,22 +212,14 @@ preflight() {
   log "Preflight complete."
 }
 
-# ---------- main ----------
-preflight
+# ============================================================================
+#  Bidar Userbot Manager
+#  Interactive menu: install / start / stop / restart / update / uninstall.
+# ============================================================================
 
-read -r -p "Please enter your API ID: " api_id
-read -r -p "Please enter your API Hash: " api_hash
-read -r -p "Please enter your phone number: " phone_number
-read -r -p "Please enter admin user IDs (comma separated): " admin_users
-read -r -p "Please enter your Emergent LLM key (sk-emergent-...): " emergent_key
-
-export TG_API_ID="$api_id"
-export TG_API_HASH="$api_hash"
-export TG_PHONE_NUMBER="$phone_number"
-export TG_ADMIN_USERS="$admin_users"
-export TG_EMERGENT_LLM_KEY="$emergent_key"
-
-cat > "$PYTHON_FILE" <<'PY'
+# Writes (or overwrites) the Python bot file (tools.py) from the embedded source.
+write_python_file() {
+  cat > "$PYTHON_FILE" <<'PY'
 from telethon import TelegramClient, events, utils, errors
 import asyncio
 import time
@@ -2007,29 +2000,142 @@ async def main():
 
 client.loop.run_until_complete(main())
 PY
+  log "Python file '${PYTHON_FILE}' has been created."
+}
 
-log "Python file '${PYTHON_FILE}' has been created."
-
-# Persist credentials to .env so the bot can run headless (systemd/nohup) without re-exporting.
-cat > .env <<EOF
+# Persist the Telegram/Emergent credentials to .env for headless (systemd/nohup) runs.
+write_env_file() {
+  cat > .env <<EOF
 TG_API_ID=${api_id}
 TG_API_HASH=${api_hash}
 TG_PHONE_NUMBER=${phone_number}
 TG_ADMIN_USERS=${admin_users}
 TG_EMERGENT_LLM_KEY=${emergent_key}
 EOF
-chmod 600 .env 2>/dev/null || true
-log "Saved credentials to .env (used for headless runs)."
+  chmod 600 .env 2>/dev/null || true
+  log "Saved credentials to .env (used for headless runs)."
+}
 
-echo
-read -r -p "Run the bot permanently in the background? (no tmux/screen needed) [y/N]: " persist
-persist="${persist:-N}"
+# True if the systemd service unit exists.
+service_installed() { [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; }
 
-if [[ "$persist" =~ ^[Yy]$ ]]; then
-  log "Step 1/2: One-time Telegram login (you may be asked for the login code / 2FA password)..."
-  # Write the login bootstrap to a real file so input() reads from the terminal.
-  # (Running via "python3 -" consumes stdin, breaking the interactive code prompt.)
-  cat > _tg_login.py <<'LOGIN'
+start_bot() {
+  if service_installed; then
+    $SUDO systemctl start "${SERVICE_NAME}" && log "Service started." || warn "Could not start service."
+  elif [[ -f userbot.pid ]] && kill -0 "$(cat userbot.pid 2>/dev/null)" 2>/dev/null; then
+    log "Bot is already running (PID $(cat userbot.pid))."
+  else
+    [[ -f "$PYTHON_FILE" ]] || { warn "tools.py not found. Run Install first."; return 0; }
+    nohup python3 "$PYTHON_FILE" > userbot.log 2>&1 &
+    echo $! > userbot.pid
+    log "Bot started in background (PID $(cat userbot.pid)). Logs: userbot.log"
+  fi
+}
+
+stop_bot() {
+  local stopped=false
+  if service_installed; then
+    if $SUDO systemctl stop "${SERVICE_NAME}" 2>/dev/null; then stopped=true; fi
+  fi
+  if [[ -f userbot.pid ]]; then
+    if kill "$(cat userbot.pid)" 2>/dev/null; then stopped=true; fi
+    rm -f userbot.pid
+  fi
+  if $stopped; then log "Bot stopped."; else warn "No running bot found."; fi
+}
+
+restart_bot() {
+  if service_installed; then
+    $SUDO systemctl restart "${SERVICE_NAME}" && log "Service restarted." || warn "Restart failed."
+  else
+    stop_bot
+    sleep 1
+    start_bot
+  fi
+}
+
+status_bot() {
+  if service_installed; then
+    $SUDO systemctl status "${SERVICE_NAME}" --no-pager || true
+  elif [[ -f userbot.pid ]] && kill -0 "$(cat userbot.pid 2>/dev/null)" 2>/dev/null; then
+    log "Bot is running in background (PID $(cat userbot.pid))."
+  else
+    warn "Bot is not running."
+  fi
+}
+
+logs_bot() {
+  if service_installed; then
+    log "Last 50 log lines (live view:  ${SUDO} journalctl -u ${SERVICE_NAME} -f )"
+    $SUDO journalctl -u "${SERVICE_NAME}" -n 50 --no-pager || true
+  elif [[ -f userbot.log ]]; then
+    tail -n 50 userbot.log
+  else
+    warn "No logs found."
+  fi
+}
+
+# Check prerequisites (install anything missing) and refresh the bot code on the server.
+update_bot() {
+  log "Updating: checking prerequisites and refreshing bot code..."
+  preflight
+  if [[ ! -f .env ]]; then
+    warn ".env not found - the bot doesn't seem to be installed yet. Use option 1 (Install)."
+    return 0
+  fi
+  write_python_file
+  log "Restarting to apply the update..."
+  restart_bot
+  log "Update complete. You're on v1.9.2."
+}
+
+uninstall_bot() {
+  read -r -p "Stop and REMOVE the bot. Keep your Telegram login session? [Y/n]: " keepsess || true
+  keepsess="${keepsess:-Y}"
+  stop_bot
+  if service_installed; then
+    $SUDO systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+    $SUDO rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+    $SUDO systemctl daemon-reload 2>/dev/null || true
+    log "Removed systemd service."
+  fi
+  rm -f userbot.pid userbot.log _tg_login.py "$PYTHON_FILE" bot_config.json sticker_state.json
+  if [[ "$keepsess" =~ ^[Nn]$ ]]; then
+    rm -f session_name.session session_name.session-journal .env
+    log "Removed Telegram session and credentials too."
+  else
+    log "Kept session_name.session and .env (no re-login needed next time)."
+  fi
+  log "Uninstall complete."
+}
+
+# Full first-time installation (asks for credentials, sets up the service, logs in).
+do_install() {
+  preflight
+
+  read -r -p "Please enter your API ID: " api_id
+  read -r -p "Please enter your API Hash: " api_hash
+  read -r -p "Please enter your phone number: " phone_number
+  read -r -p "Please enter admin user IDs (comma separated): " admin_users
+  read -r -p "Please enter your Emergent LLM key (sk-emergent-...): " emergent_key
+
+  export TG_API_ID="$api_id"
+  export TG_API_HASH="$api_hash"
+  export TG_PHONE_NUMBER="$phone_number"
+  export TG_ADMIN_USERS="$admin_users"
+  export TG_EMERGENT_LLM_KEY="$emergent_key"
+
+  write_python_file
+  write_env_file
+
+  echo
+  read -r -p "Run the bot permanently in the background? (no tmux/screen needed) [y/N]: " persist
+  persist="${persist:-N}"
+
+  if [[ "$persist" =~ ^[Yy]$ ]]; then
+    log "Step 1/2: One-time Telegram login (you may be asked for the login code / 2FA password)..."
+    # Write the login bootstrap to a real file so input() reads from the terminal.
+    cat > _tg_login.py <<'LOGIN'
 import os
 from telethon import TelegramClient
 
@@ -2045,26 +2151,25 @@ me = client.get_me()
 print("Login OK. Logged in as:", getattr(me, "first_name", "user"))
 client.disconnect()
 LOGIN
-  if python3 _tg_login.py; then
-    rm -f _tg_login.py
-  else
-    rm -f _tg_login.py
-    die "Telegram login failed. Please re-run the script and complete the login."
-  fi
+    if python3 _tg_login.py; then
+      rm -f _tg_login.py
+    else
+      rm -f _tg_login.py
+      die "Telegram login failed. Please re-run the script and complete the login."
+    fi
 
-  WORKDIR="$(pwd)"
-  PYBIN="$(command -v python3)"
+    WORKDIR="$(pwd)"
+    PYBIN="$(command -v python3)"
 
-  can_root=false
-  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "$SUDO" ]]; then
-    can_root=true
-  fi
+    can_root=false
+    if [[ "${EUID:-$(id -u)}" -eq 0 || -n "$SUDO" ]]; then
+      can_root=true
+    fi
 
-  if have systemctl && $can_root && ! is_termux; then
-    SERVICE_NAME="tg-userbot"
-    RUN_USER="$(id -un)"
-    log "Step 2/2: Installing systemd service '${SERVICE_NAME}'..."
-    $SUDO tee /etc/systemd/system/${SERVICE_NAME}.service >/dev/null <<EOF
+    if have systemctl && $can_root && ! is_termux; then
+      RUN_USER="$(id -un)"
+      log "Step 2/2: Installing systemd service '${SERVICE_NAME}'..."
+      $SUDO tee /etc/systemd/system/${SERVICE_NAME}.service >/dev/null <<EOF
 [Unit]
 Description=Telegram Userbot (tg.sh)
 After=network-online.target
@@ -2081,26 +2186,74 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 || true
-    $SUDO systemctl restart ${SERVICE_NAME}
-    log "Done! The bot now runs as a service and auto-starts on reboot."
-    log "Useful commands:"
-    log "  Status: ${SUDO} systemctl status ${SERVICE_NAME}"
-    log "  Logs:   ${SUDO} journalctl -u ${SERVICE_NAME} -f"
-    log "  Stop:   ${SUDO} systemctl stop ${SERVICE_NAME}"
-  else
-    log "Step 2/2: systemd not available. Starting in background with nohup..."
-    nohup "$PYBIN" "${WORKDIR}/${PYTHON_FILE}" > userbot.log 2>&1 &
-    echo $! > userbot.pid
-    log "Done! The bot is running in the background (PID $(cat userbot.pid))."
-    log "  Logs: tail -f ${WORKDIR}/userbot.log"
-    log "  Stop: kill \$(cat ${WORKDIR}/userbot.pid)"
-    if is_termux; then
-      log "Termux tip: run 'termux-wake-lock' and install Termux:Boot to survive reboots."
+      $SUDO systemctl daemon-reload
+      $SUDO systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 || true
+      $SUDO systemctl restart ${SERVICE_NAME}
+      log "Done! The bot now runs as a service and auto-starts on reboot."
+    else
+      log "Step 2/2: systemd not available. Starting in background with nohup..."
+      nohup "$PYBIN" "${WORKDIR}/${PYTHON_FILE}" > userbot.log 2>&1 &
+      echo $! > userbot.pid
+      log "Done! The bot is running in the background (PID $(cat userbot.pid))."
+      if is_termux; then
+        log "Termux tip: run 'termux-wake-lock' and install Termux:Boot to survive reboots."
+      fi
     fi
+  else
+    log "Starting the bot in the foreground (press Ctrl+C to stop)..."
+    python3 "$PYTHON_FILE"
   fi
-else
-  log "Starting the bot in the foreground (press Ctrl+C to stop)..."
-  python3 "$PYTHON_FILE"
-fi
+}
+
+print_menu() {
+  local state="(not installed yet)"
+  if service_installed || [[ -f "$PYTHON_FILE" ]]; then state="(installation detected)"; fi
+  echo
+  echo "===================================="
+  echo "     Bidar Userbot Manager  v1.9.2"
+  echo "     ${state}"
+  echo "===================================="
+  echo "  1) Install / Setup        (نصب)"
+  echo "  2) Start                  (شروع)"
+  echo "  3) Stop                   (توقف)"
+  echo "  4) Restart                (ری‌استارت)"
+  echo "  5) Update deps & code     (آپدیت)"
+  echo "  6) Status                 (وضعیت)"
+  echo "  7) Logs                   (لاگ)"
+  echo "  8) Uninstall / Remove     (حذف)"
+  echo "  9) Exit                   (خروج)"
+  echo "===================================="
+}
+
+main_menu() {
+  while true; do
+    print_menu
+    read -r -p "Choose an option [1-9]: " choice || exit 0
+    case "$choice" in
+      1) do_install || true ;;
+      2) start_bot || true ;;
+      3) stop_bot || true ;;
+      4) restart_bot || true ;;
+      5) update_bot || true ;;
+      6) status_bot || true ;;
+      7) logs_bot || true ;;
+      8) uninstall_bot || true ;;
+      9|q|Q) log "Bye!"; exit 0 ;;
+      *) warn "Invalid option. Please choose 1-9." ;;
+    esac
+  done
+}
+
+# Non-interactive subcommands are also supported, e.g.:  ./tg.sh update
+case "${1:-}" in
+  install)   do_install ;;
+  start)     start_bot ;;
+  stop)      stop_bot ;;
+  restart)   restart_bot ;;
+  update)    update_bot ;;
+  status)    status_bot ;;
+  logs)      logs_bot ;;
+  uninstall) uninstall_bot ;;
+  ""|menu)   main_menu ;;
+  *) echo "Usage: $0 [install|start|stop|restart|update|status|logs|uninstall|menu]"; exit 1 ;;
+esac
